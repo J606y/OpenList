@@ -556,6 +556,57 @@ choose_cache_mode() {
     esac
 }
 
+# ----------------------------- 选择并应用 HTTPS 证书 ------------------------
+# 弹证书方式菜单并落地（渲染站点 + reload）。新建/管理换证书共用，所以「申请失败」
+# 后进管理也能改选别的方式（HTTP-01 / DNS / 本地证书 / 仅 HTTP）。
+# 用法: apply_https_cert <domain> <target> <maxbody> <cache>
+# 返回: 0=已写入并启用了可用站点配置（HTTP 或 HTTPS）；1=失败/取消，未写可用配置
+apply_https_cert() {
+    local domain="$1" target="$2" maxbody="$3" cache="$4"
+    echo "  请选择 HTTPS 证书方式："
+    echo "    1) acme.sh 自动申请（HTTP-01，需 80 端口可达，推荐）"
+    echo "    2) acme.sh 自动申请（DNS API，支持泛域名）"
+    echo "    3) 使用已有证书文件（本地证书，输入路径）"
+    echo "    4) 不启用 HTTPS（仅 80）"
+    local s; read -rp "  输入 [1-4]（默认1）: " s
+    case "$s" in
+        4)
+            render_site_file "$domain" "$target" "$maxbody" "$cache" "none" "" ""
+            reload_nginx && { ok "已设为仅 HTTP：http://$domain"; return 0; }
+            return 1 ;;
+        3)
+            local crt key
+            read -rp "  证书 fullchain 路径: " crt
+            read -rp "  私钥 key 路径: " key
+            if [ ! -f "$crt" ] || [ ! -f "$key" ]; then err "证书文件不存在"; return 1; fi
+            render_site_file "$domain" "$target" "$maxbody" "$cache" "file" "$crt" "$key"
+            reload_nginx && { ok "已启用（本地证书）：https://$domain"; return 0; }
+            return 1 ;;
+        2)
+            echo "    DNS 服务商： 1) Cloudflare  2) 阿里云  3) 腾讯云(DNSPod)"
+            local dp; read -rp "    选择 [1-3]: " dp
+            local prov; case "$dp" in 1) prov=cloudflare;; 2) prov=aliyun;; 3) prov=tencent;; *) err "无效"; return 1;; esac
+            if issue_cert_dns "$domain" "$prov" && install_cert_to_nginx "$domain"; then
+                render_site_file "$domain" "$target" "$maxbody" "$cache" "dns" \
+                    "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
+                reload_nginx && { ok "已启用（HTTPS + 泛域名证书）：https://$domain"; return 0; }
+            fi
+            err "证书申请失败。"; return 1 ;;
+        *)
+            # 先建/保留 HTTP 站点承载 acme challenge，再签发，最后换成 HTTPS
+            render_site_file "$domain" "$target" "$maxbody" "$cache" "none" "" ""
+            reload_nginx || { err "初始 HTTP 配置失败"; return 1; }
+            if issue_cert_http "$domain" && install_cert_to_nginx "$domain"; then
+                render_site_file "$domain" "$target" "$maxbody" "$cache" "le" \
+                    "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
+                reload_nginx && ok "已启用（HTTPS + 自动证书）：https://$domain"
+            else
+                err "证书申请失败，已保留仅 HTTP 站点。请检查域名解析 / 80 端口可达性，或改用 DNS API / 本地证书。"
+            fi
+            return 0 ;;   # HTTP 站点仍在，算"已写可用配置"
+    esac
+}
+
 # ----------------------------- 新增反代站点 ---------------------------------
 configure_reverse_proxy() {
     command -v nginx >/dev/null 2>&1 || { err "请先安装 Nginx（菜单 1）"; pause; return; }
@@ -571,52 +622,7 @@ configure_reverse_proxy() {
 
     choose_cache_mode
 
-    echo "  请选择 HTTPS 证书方式："
-    echo "    1) acme.sh 自动申请（HTTP-01，需 80 端口可达，推荐）"
-    echo "    2) acme.sh 自动申请（DNS API，支持泛域名）"
-    echo "    3) 使用已有证书文件（输入路径）"
-    echo "    4) 不启用 HTTPS（仅 80）"
-    local s; read -rp "  输入 [1-4]（默认1）: " s
-
-    case "$s" in
-        4)
-            render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "none" "" ""
-            reload_nginx && { ok "已创建（仅 HTTP）：http://$domain"; created=1; }
-            ;;
-        3)
-            local crt key
-            read -rp "  证书 fullchain 路径: " crt
-            read -rp "  私钥 key 路径: " key
-            if [ ! -f "$crt" ] || [ ! -f "$key" ]; then err "证书文件不存在"; pause; return; fi
-            render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "file" "$crt" "$key"
-            reload_nginx && { ok "已创建（HTTPS，自带证书）：https://$domain"; created=1; }
-            ;;
-        2)
-            echo "    DNS 服务商： 1) Cloudflare  2) 阿里云  3) 腾讯云(DNSPod)"
-            local dp; read -rp "    选择 [1-3]: " dp
-            local prov; case "$dp" in 1) prov=cloudflare;; 2) prov=aliyun;; 3) prov=tencent;; *) err "无效"; pause; return;; esac
-            if issue_cert_dns "$domain" "$prov" && install_cert_to_nginx "$domain"; then
-                render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "dns" \
-                    "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
-                reload_nginx && { ok "已创建（HTTPS + 泛域名证书）：https://$domain"; created=1; }
-            else
-                err "证书申请失败，未创建 HTTPS 站点。"
-            fi
-            ;;
-        *)
-            # 先建 HTTP 站点以承载 acme challenge，再签发，最后换成 HTTPS
-            render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "none" "" ""
-            reload_nginx || { err "初始 HTTP 配置失败"; pause; return; }
-            created=1
-            if issue_cert_http "$domain" && install_cert_to_nginx "$domain"; then
-                render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "le" \
-                    "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
-                reload_nginx && ok "已创建（HTTPS + 自动证书）：https://$domain"
-            else
-                err "证书申请失败，已保留仅 HTTP 站点。请检查域名解析 / 80 端口可达性。"
-            fi
-            ;;
-    esac
+    if apply_https_cert "$domain" "$target" "$maxbody" "$CACHE_MODE"; then created=1; fi
 
     # 反代建好后的两个收尾询问：
     if [ "$created" = 1 ]; then
@@ -675,7 +681,7 @@ manage_reverse_proxy() {
     echo "  当前： $domain -> $target  [缓存:$cache 证书:$ssl 上限:${maxbody}m]"
     echo "    1) 修改反代目标"
     echo "    2) 修改缓存模式"
-    echo "    3) 申请/更换 HTTPS 证书"
+    echo "    3) 申请/更换 HTTPS 证书（HTTP-01 / DNS / 本地证书 / 仅 HTTP）"
     echo "    4) 删除该站点"
     echo "    0) 返回"
     local op; read -rp "  选择: " op
@@ -693,13 +699,7 @@ manage_reverse_proxy() {
             ;;
         3)
             ensure_global_conf
-            if issue_cert_http "$domain" && install_cert_to_nginx "$domain"; then
-                render_site_file "$domain" "$target" "$maxbody" "$cache" "le" \
-                    "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
-                reload_nginx && ok "证书已申请并启用 HTTPS"
-            else
-                err "证书申请失败"
-            fi
+            apply_https_cert "$domain" "$target" "$maxbody" "$cache"
             ;;
         4)
             read -rp "  确认删除 $domain ？(y/N): " yn

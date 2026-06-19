@@ -18,6 +18,7 @@ set -o pipefail
 SITES_AVAIL="/etc/nginx/sites-available"
 SITES_ENABLED="/etc/nginx/sites-enabled"
 GLOBAL_CONF="/etc/nginx/conf.d/00-1keji-rp.conf"
+DENY_IP_CONF="/etc/nginx/conf.d/00-deny-direct-ip.conf"   # 禁止用 IP 直连的兜底 server
 CERT_DIR="/etc/nginx/certs"
 ACME_WEBROOT="/var/www/acme"
 CACHE_DIR="/var/cache/nginx/1keji_rp"
@@ -184,6 +185,81 @@ restrict_backend_port() {
            warn "请到后端所在主机上操作，或把后端端口仅绑定 127.0.0.1。"; return 0 ;;
     esac
     restrict_port "$port"
+}
+
+# ------------------- 禁止用 IP 直接访问（仅允许域名） -----------------------
+# 加一个 default_server 兜底：Host/SNI 不是已配置域名（即用 IP 或未知域名访问）时，
+# HTTP 直接 444、HTTPS 拒绝握手。真实站点都带 server_name，只有 IP/未知域名会落到这里。
+deny_ip_enabled() { [ -f "$DENY_IP_CONF" ]; }
+
+# nginx >= 1.19.4 才有 ssl_reject_handshake（可不带证书直接拒绝未知 SNI）
+nginx_supports_reject_handshake() {
+    local v
+    v=$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -n "$v" ] && [ "$(printf '%s\n1.19.4\n' "$v" | sort -V | head -1)" = "1.19.4" ]
+}
+
+# 老版本 nginx 回落：生成一张自签证书占位（只给兜底 server 用，真实域名各走各的证书）
+ensure_snakeoil_cert() {
+    local d="$CERT_DIR/_snakeoil"
+    [ -f "$d/crt.pem" ] && [ -f "$d/key.pem" ] && return 0
+    command -v openssl >/dev/null 2>&1 || return 1
+    mkdir -p "$d"
+    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=invalid" \
+        -keyout "$d/key.pem" -out "$d/crt.pem" >/dev/null 2>&1
+}
+
+enable_deny_ip() {
+    command -v nginx >/dev/null 2>&1 || { err "请先安装 Nginx（菜单 1）"; return 1; }
+    # 系统自带默认站点也占 default_server，会冲突，先停用
+    if [ -e "$SITES_ENABLED/default" ]; then
+        rm -f "$SITES_ENABLED/default"
+        warn "已停用系统默认站点 sites-enabled/default（避免 default_server 冲突）"
+    fi
+
+    # 443 兜底块：优先 ssl_reject_handshake；老版本回落自签证书 + 444
+    local https_block=""
+    if nginx_supports_reject_handshake; then
+        https_block="    ssl_reject_handshake on;"
+    elif ensure_snakeoil_cert; then
+        https_block="    ssl_certificate     $CERT_DIR/_snakeoil/crt.pem;
+    ssl_certificate_key $CERT_DIR/_snakeoil/key.pem;
+    return 444;"
+    else
+        warn "nginx 太旧且无 openssl，HTTPS 用 IP 访问无法封，仅封 HTTP。"
+    fi
+
+    {
+        echo "# 由 nginx-rp.sh 管理：禁止用 IP / 未知域名直接访问，只有配置过的域名能访问。"
+        echo "server {"
+        echo "    listen 80 default_server;"
+        echo "    listen [::]:80 default_server;"
+        echo "    server_name _;"
+        echo "    return 444;"
+        echo "}"
+        if [ -n "$https_block" ]; then
+            echo "server {"
+            echo "    listen 443 ssl default_server;"
+            echo "    listen [::]:443 ssl default_server;"
+            echo "    server_name _;"
+            echo "$https_block"
+            echo "}"
+        fi
+    } > "$DENY_IP_CONF"
+
+    if reload_nginx; then
+        ok "已开启：用 IP 直接访问将被拒绝，只有域名能打开。"
+    else
+        err "配置测试失败，已回滚（可能与已有 default_server 冲突）。"
+        rm -f "$DENY_IP_CONF"; reload_nginx
+        return 1
+    fi
+}
+
+disable_deny_ip() {
+    [ -f "$DENY_IP_CONF" ] || { info "未开启「禁止 IP 直连」"; return 0; }
+    rm -f "$DENY_IP_CONF"
+    reload_nginx && ok "已关闭「禁止 IP 直连」（IP 访问恢复默认行为）。"
 }
 
 # ----------------------------- 全局配置 -------------------------------------
@@ -519,18 +595,26 @@ configure_reverse_proxy() {
             ;;
     esac
 
-    # 反代建好后，询问是否封锁公网经 IP:端口 直连后端（仅当目标在本机时有意义）
+    # 反代建好后的两个收尾询问：
     if [ "$created" = 1 ]; then
+        # (a) 后端在本机时：是否封后端端口(如 5244)的公网直连
         local _hp _host
         _hp="${target#*://}"; _hp="${_hp%%/*}"; _host="${_hp%%:*}"
         case "$_host" in
             127.0.0.1|localhost|::1|0.0.0.0)
                 echo
                 local _yn
-                read -rp "是否关闭通过 IP:端口 直连后端，仅允许经域名/Nginx 访问？(y/N): " _yn
+                read -rp "是否封锁后端端口的公网直连(如 IP:5244)，仅允许经 Nginx？(y/N): " _yn
                 case "$_yn" in y|Y) restrict_backend_port "$target" ;; esac
                 ;;
         esac
+        # (b) 是否禁止用 IP 直接打开网站(80/443)，仅允许域名访问（未开启时才问）
+        if ! deny_ip_enabled; then
+            echo
+            local _yn2
+            read -rp "是否禁止用 IP 直接访问网站，仅允许域名访问？(y/N): " _yn2
+            case "$_yn2" in y|Y) enable_deny_ip ;; esac
+        fi
     fi
     pause
 }
@@ -639,7 +723,7 @@ uninstall_nginx() {
     systemctl stop nginx 2>/dev/null
     systemctl disable nginx 2>/dev/null
     apt-get purge -y nginx nginx-common nginx-core >/dev/null 2>&1
-    rm -f "$GLOBAL_CONF"
+    rm -f "$GLOBAL_CONF" "$DENY_IP_CONF"
     rm -rf "$CACHE_DIR"
     warn "Nginx 已卸载。证书目录 $CERT_DIR 与 acme.sh($ACME_HOME) 保留，如需彻底清理请手动删除。"
     pause
@@ -663,6 +747,21 @@ port_block_menu() {
     pause
 }
 
+# ------------------- 禁止 IP 直接访问开关 -----------------------------------
+deny_ip_menu() {
+    if deny_ip_enabled; then
+        warn "禁止 IP 直接访问：当前【已开启】（用 IP 打开网站会被拒绝）"
+        local yn; read -rp "  关闭它？(y/N): " yn
+        case "$yn" in y|Y) disable_deny_ip ;; esac
+    else
+        info "禁止 IP 直接访问：当前【未开启】"
+        echo "  开启后：http://服务器IP 打不开，只有配置过的域名能访问。"
+        local yn; read -rp "  现在开启？(y/N): " yn
+        case "$yn" in y|Y) enable_deny_ip ;; esac
+    fi
+    pause
+}
+
 # ----------------------------- 管理子菜单 -----------------------------------
 manage_menu() {
     while true; do
@@ -671,13 +770,15 @@ manage_menu() {
         echo "  1. 管理已配置站点（改目标 / 改缓存 / 换证书 / 删除）"
         echo "  2. 证书 / 自动续签管理"
         echo "  3. 后端端口直连封锁（开 / 关）"
+        echo "  4. 禁止用 IP 直接访问（开 / 关，仅域名可访问）"
         echo "  0. 返回上级"
         echo "----------------------------------------"
-        local op; read -rp "请选择 [0-3]: " op
+        local op; read -rp "请选择 [0-4]: " op
         case "$op" in
             1) manage_reverse_proxy ;;
             2) cert_menu ;;
             3) port_block_menu ;;
+            4) deny_ip_menu ;;
             0) return ;;
             *) warn "无效选项"; sleep 1 ;;
         esac

@@ -2,9 +2,7 @@ services:
   openlist:
     build:
       context: .
-      dockerfile: Dockerfile.allinone
-      additional_contexts:
-        frontend: ../openlist-frontend
+      dockerfile: Dockerfile.custom
       args:
         VERSION: custom
         GIT_COMMIT: ${GIT_COMMIT:-local}

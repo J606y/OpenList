@@ -51,18 +51,6 @@ func Search(ctx context.Context, req model.SearchReq) ([]model.SearchNode, int64
 	return instance.Search(ctx, req)
 }
 
-func Index(ctx context.Context, parent string, obj model.Obj) error {
-	if instance == nil {
-		return errs.SearchNotAvailable
-	}
-	return instance.Index(ctx, model.SearchNode{
-		Parent: parent,
-		Name:   obj.GetName(),
-		IsDir:  obj.IsDir(),
-		Size:   obj.GetSize(),
-	})
-}
-
 type ObjWithParent struct {
 	Parent string
 	model.Obj

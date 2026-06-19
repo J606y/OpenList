@@ -1,0 +1,15 @@
+.git
+.github
+*.exe
+openlist
+openlist-linux-*
+/data
+/log
+build/
+dist/
+dist.tar.gz
+*.db
+*.db-*
+.idea
+.vscode
+# 注意：不要忽略 public/dist —— 定制前端就靠它嵌入

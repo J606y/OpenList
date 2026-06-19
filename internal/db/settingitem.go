@@ -39,14 +39,6 @@ func GetPublicSettingItems() ([]model.SettingItem, error) {
 	return settingItems, nil
 }
 
-func GetSettingItemsByGroup(group int) ([]model.SettingItem, error) {
-	var settingItems []model.SettingItem
-	if err := db.Where(fmt.Sprintf("%s = ?", columnName("group")), group).Find(&settingItems).Error; err != nil {
-		return nil, errors.WithStack(err)
-	}
-	return settingItems, nil
-}
-
 func GetSettingItemsInGroups(groups []int) ([]model.SettingItem, error) {
 	var settingItems []model.SettingItem
 	err := db.Order(columnName("index")).Where(fmt.Sprintf("%s in ?", columnName("group")), groups).Find(&settingItems).Error

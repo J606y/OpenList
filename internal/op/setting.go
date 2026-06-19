@@ -44,15 +44,6 @@ func GetPublicSettingsMap() map[string]string {
 	return pSettings
 }
 
-func GetSettingsMap() map[string]string {
-	items, _ := GetSettingItems()
-	settings := make(map[string]string)
-	for _, item := range items {
-		settings[item.Key] = item.Value
-	}
-	return settings
-}
-
 func GetSettingItems() ([]model.SettingItem, error) {
 	if items, exists := Cache.GetSettingGroup("ALL_SETTING_ITEMS"); exists {
 		return items, nil
@@ -109,22 +100,6 @@ func GetSettingItemInKeys(keys []string) ([]model.SettingItem, error) {
 		items = append(items, *item)
 	}
 	return items, nil
-}
-
-func GetSettingItemsByGroup(group int) ([]model.SettingItem, error) {
-	key := fmt.Sprintf("GROUP_%d", group)
-	if items, exists := Cache.GetSettingGroup(key); exists {
-		return items, nil
-	}
-	items, err, _ := settingGroupG.Do(key, func() ([]model.SettingItem, error) {
-		_items, err := db.GetSettingItemsByGroup(group)
-		if err != nil {
-			return nil, err
-		}
-		settingGroupCacheF(key, _items)
-		return _items, nil
-	})
-	return items, err
 }
 
 func GetSettingItemsInGroups(groups []int) ([]model.SettingItem, error) {

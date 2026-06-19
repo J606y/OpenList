@@ -1,0 +1,51 @@
+# Dockerfile.allinone — 一条命令从源码到镜像：前端在 Docker 内 pnpm build 并嵌入。
+# 不需要手动 pnpm build / 拷 dist。
+#
+# 因为前端是独立仓库，用 BuildKit 的「命名构建上下文」把它喂进来。两种构建方式：
+#
+#   A) docker compose（推荐，docker-compose.yml 已配好 additional_contexts）：
+#        docker compose up -d --build
+#
+#   B) 直接 docker build（手动指定前端上下文，路径相对当前目录）：
+#        docker build -f Dockerfile.allinone \
+#          --build-context frontend=../openlist-frontend \
+#          -t openlist-custom:latest .
+
+# ---------- 1) 前端：容器内全新 linux 安装 + 构建 ----------
+FROM node:22-slim AS febuild
+WORKDIR /fe
+RUN npm install -g pnpm
+# 从命名上下文 frontend 拷源码；rm 掉可能带进来的 Windows node_modules，强制干净 linux 安装
+COPY --from=frontend . .
+RUN rm -rf node_modules dist && pnpm install && pnpm build
+
+# ---------- 2) 后端：go build 并嵌入前端产物 ----------
+FROM golang:1.26-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# 用前端阶段产出的 dist 覆盖嵌入目录（slim fork 已移除 jsoniter，不带该 tag）
+COPY --from=febuild /fe/dist ./public/dist
+ARG VERSION=custom
+ARG GIT_COMMIT=local
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="\
+    -s -w \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${VERSION}' \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${GIT_COMMIT}' \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=custom'" \
+    -o /app/bin/openlist .
+
+# ---------- 3) 运行镜像 ----------
+FROM alpine:edge
+RUN apk add --no-cache bash ca-certificates tzdata && \
+    addgroup -g 1001 openlist && \
+    adduser -D -u 1001 -G openlist openlist
+WORKDIR /opt/openlist/
+COPY --from=builder --chmod=755 /app/bin/openlist ./
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+ENV UMASK=022 RUN_ARIA2=false
+VOLUME /opt/openlist/data/
+EXPOSE 5244
+CMD [ "/entrypoint.sh" ]

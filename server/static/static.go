@@ -32,6 +32,12 @@ type Manifest struct {
 	Icons    []ManifestIcon `json:"icons"`
 }
 
+// built-in appearance defaults (the style settings group was removed)
+const (
+	defaultLogo      = "https://res.oplist.org/logo/logo.svg"
+	defaultMainColor = "#1890ff"
+)
+
 var static fs.FS
 
 func initStatic() {
@@ -108,12 +114,12 @@ func initIndex(siteConfig SiteConfig) {
 
 func UpdateIndex() {
 	utils.Log.Debug("Updating index.html with settings...")
-	favicon := setting.GetStr(conf.Favicon)
-	logo := strings.Split(setting.GetStr(conf.Logo), "\n")[0]
+	favicon := defaultLogo
+	logo := defaultLogo
 	title := setting.GetStr(conf.SiteTitle)
 	customizeHead := setting.GetStr(conf.CustomizeHead)
 	customizeBody := setting.GetStr(conf.CustomizeBody)
-	mainColor := setting.GetStr(conf.MainColor)
+	mainColor := defaultMainColor
 	utils.Log.Debug("Applying replacements for default pages...")
 	replaceMap1 := map[string]string{
 		"https://res.oplist.org/logo/logo.svg": favicon,
@@ -138,9 +144,8 @@ func ManifestJSON(c *gin.Context) {
 	// Get site title from settings
 	siteTitle := setting.GetStr(conf.SiteTitle)
 	
-	// Get logo from settings, use the first line (light theme logo)
-	logoSetting := setting.GetStr(conf.Logo)
-	logoUrl := strings.Split(logoSetting, "\n")[0]
+	// Use the built-in logo
+	logoUrl := defaultLogo
 
 	// Use base path from site config for consistency
 	basePath := siteConfig.BasePath

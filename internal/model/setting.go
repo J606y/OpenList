@@ -3,14 +3,14 @@ package model
 const (
 	SINGLE = iota
 	SITE
-	STYLE
+	STYLE // removed; kept to preserve the numbering of the groups below
 	PREVIEW
 	GLOBAL
 	OFFLINE_DOWNLOAD
 	INDEX
-	SSO
-	LDAP
-	S3
+	SSO  // removed; kept to preserve the numbering of the groups below
+	LDAP // removed; kept to preserve the numbering of the groups below
+	S3   // removed; kept to preserve the numbering of the groups below
 	FTP
 	TRAFFIC
 )

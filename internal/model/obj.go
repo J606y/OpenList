@@ -75,6 +75,10 @@ type Thumb interface {
 	Thumb() string
 }
 
+type Duration interface {
+	GetDuration() float64
+}
+
 type SetPath interface {
 	SetPath(path string)
 }
@@ -162,6 +166,19 @@ func GetThumb(obj Obj) (thumb string, ok bool) {
 	}
 }
 
+func GetDuration(obj Obj) (duration float64, ok bool) {
+	for {
+		switch o := obj.(type) {
+		case Duration:
+			return o.GetDuration(), true
+		case ObjUnwrap:
+			obj = o.Unwrap()
+		default:
+			return
+		}
+	}
+}
+
 func GetUrl(obj Obj) (url string, ok bool) {
 	for {
 		switch o := obj.(type) {
@@ -230,10 +247,6 @@ func (om *ObjMerge) InitHideReg(hides string) {
 	for _, r := range rs {
 		om.regs = append(om.regs, regexp2.MustCompile(r, regexp2.None))
 	}
-}
-
-func (om *ObjMerge) Reset() {
-	om.set.Clear()
 }
 
 type ObjMask uint8

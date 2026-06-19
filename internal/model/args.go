@@ -12,7 +12,6 @@ import (
 
 type ListArgs struct {
 	ReqPath            string
-	S3ShowPlaceholder  bool
 	Refresh            bool
 	WithStorageDetails bool
 	SkipHook           bool
@@ -52,53 +51,6 @@ type FsOtherArgs struct {
 	Path   string      `json:"path" form:"path"`
 	Method string      `json:"method" form:"method"`
 	Data   interface{} `json:"data" form:"data"`
-}
-
-type ArchiveArgs struct {
-	Password string
-	LinkArgs
-}
-
-type ArchiveInnerArgs struct {
-	ArchiveArgs
-	InnerPath string
-}
-
-type ArchiveMetaArgs struct {
-	ArchiveArgs
-	Refresh bool
-}
-
-type ArchiveListArgs struct {
-	ArchiveInnerArgs
-	Refresh bool
-}
-
-type ArchiveDecompressArgs struct {
-	ArchiveInnerArgs
-	CacheFull     bool
-	PutIntoNewDir bool
-	Overwrite     bool
-}
-
-type SharingListArgs struct {
-	Refresh bool
-	Pwd     string
-}
-
-type SharingArchiveMetaArgs struct {
-	ArchiveMetaArgs
-	Pwd string
-}
-
-type SharingArchiveListArgs struct {
-	ArchiveListArgs
-	Pwd string
-}
-
-type SharingLinkArgs struct {
-	Pwd string
-	LinkArgs
 }
 
 type RangeReaderIF interface {

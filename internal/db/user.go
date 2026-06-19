@@ -25,14 +25,6 @@ func GetUserByName(username string) (*model.User, error) {
 	return &user, nil
 }
 
-func GetUserBySSOID(ssoID string) (*model.User, error) {
-	user := model.User{SsoID: ssoID}
-	if err := db.Where(user).First(&user).Error; err != nil {
-		return nil, errors.Wrapf(err, "The single sign on platform is not bound to any users")
-	}
-	return &user, nil
-}
-
 func GetUserById(id uint) (*model.User, error) {
 	var u model.User
 	if err := db.First(&u, id).Error; err != nil {

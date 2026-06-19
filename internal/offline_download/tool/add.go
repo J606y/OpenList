@@ -8,14 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	_115 "github.com/OpenListTeam/OpenList/v4/drivers/115"
-	_115_open "github.com/OpenListTeam/OpenList/v4/drivers/115_open"
-	_123 "github.com/OpenListTeam/OpenList/v4/drivers/123"
-	_123_open "github.com/OpenListTeam/OpenList/v4/drivers/123_open"
 	"github.com/OpenListTeam/OpenList/v4/drivers/pikpak"
-	"github.com/OpenListTeam/OpenList/v4/drivers/thunder"
-	"github.com/OpenListTeam/OpenList/v4/drivers/thunder_browser"
-	"github.com/OpenListTeam/OpenList/v4/drivers/thunderx"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
@@ -79,20 +72,6 @@ func AddURL(ctx context.Context, args *AddURLArgs) (task.TaskExtensionInfo, erro
 		// Fallback to creating a download task when storage lacks native PutURL support.
 	}
 
-	// ed2k 链接自动路由：如果当前工具不支持 ed2k，自动尝试使用迅雷系工具
-	if isEd2kURL(args.URL) {
-		if !isEd2kCapableTool(args.Tool) {
-			// 尝试找到一个可用的支持 ed2k 的工具
-			fallbackTool, fallbackName := findEd2kCapableTool()
-			if fallbackTool != nil {
-				// 使用找到的迅雷工具替代
-				args.Tool = fallbackName
-			} else {
-				return nil, fmt.Errorf("ed2k protocol is not supported by %s. Please configure and use Thunder/ThunderX/ThunderBrowser for ed2k links", args.Tool)
-			}
-		}
-	}
-
 	// get tool
 	tool, err := Tools.Get(args.Tool)
 	if err != nil {
@@ -112,55 +91,11 @@ func AddURL(ctx context.Context, args *AddURLArgs) (task.TaskExtensionInfo, erro
 
 	// 如果当前 storage 是对应网盘，则直接下载到目标路径，无需转存
 	switch args.Tool {
-	case "115 Cloud":
-		if _, ok := storage.(*_115.Pan115); ok {
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.Pan115TempDir), uid)
-		}
-	case "115 Open":
-		if _, ok := storage.(*_115_open.Open115); ok {
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.Pan115OpenTempDir), uid)
-		}
-	case "123 Open":
-		if _, ok := storage.(*_123_open.Open123); ok && dstDirActualPath != "/" {
-			// directly offline downloading to the root path is not allowed via 123 open platform
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.Pan123OpenTempDir), uid)
-		}
-	case "123Pan":
-		if _, ok := storage.(*_123.Pan123); ok {
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.Pan123TempDir), uid)
-		}
 	case "PikPak":
 		if _, ok := storage.(*pikpak.PikPak); ok {
 			tempDir = args.DstDirPath
 		} else {
 			tempDir = filepath.Join(setting.GetStr(conf.PikPakTempDir), uid)
-		}
-	case "Thunder":
-		if _, ok := storage.(*thunder.Thunder); ok {
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.ThunderTempDir), uid)
-		}
-	case "ThunderBrowser":
-		switch storage.(type) {
-		case *thunder_browser.ThunderBrowser, *thunder_browser.ThunderBrowserExpert:
-			tempDir = args.DstDirPath
-		default:
-			tempDir = filepath.Join(setting.GetStr(conf.ThunderBrowserTempDir), uid)
-		}
-	case "ThunderX":
-		if _, ok := storage.(*thunderx.ThunderX); ok {
-			tempDir = args.DstDirPath
-		} else {
-			tempDir = filepath.Join(setting.GetStr(conf.ThunderXTempDir), uid)
 		}
 	}
 
@@ -199,40 +134,4 @@ func isSimpleHttpSchemeUnsupported(urlStr string) bool {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	return scheme != "http" && scheme != "https"
-}
-
-// isEd2kURL 检测 URL 是否为 ed2k 协议
-func isEd2kURL(urlStr string) bool {
-	return strings.HasPrefix(strings.ToLower(urlStr), "ed2k://")
-}
-
-// ed2kCapableTools 支持 ed2k 协议的工具列表（迅雷系）
-var ed2kCapableTools = []string{"Thunder", "ThunderX", "ThunderBrowser"}
-
-// isEd2kCapableTool 检查工具是否支持 ed2k 协议
-func isEd2kCapableTool(toolName string) bool {
-	for _, t := range ed2kCapableTools {
-		if t == toolName {
-			return true
-		}
-	}
-	return false
-}
-
-// findEd2kCapableTool 查找一个可用的支持 ed2k 的工具
-func findEd2kCapableTool() (Tool, string) {
-	for _, name := range ed2kCapableTools {
-		t, err := Tools.Get(name)
-		if err != nil {
-			continue
-		}
-		if t.IsReady() {
-			return t, name
-		}
-		// 尝试初始化
-		if _, err := t.Init(); err == nil && t.IsReady() {
-			return t, name
-		}
-	}
-	return nil, ""
 }

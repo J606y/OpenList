@@ -2,17 +2,12 @@ package handles
 
 import (
 	"context"
-	"errors"
 	"strconv"
-	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
-	"github.com/OpenListTeam/OpenList/v4/internal/driver"
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
-	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -23,49 +18,14 @@ type StorageResp struct {
 	MountDetails *model.StorageDetails `json:"mount_details,omitempty"`
 }
 
-type detailWithIndex struct {
-	idx int
-	val *model.StorageDetails
-}
-
-func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp {
+// makeStorageResp builds the storage list response. Storage details are always
+// hidden in the manage page (the style settings that controlled this were removed).
+func makeStorageResp(storages []model.Storage) []*StorageResp {
 	ret := make([]*StorageResp, len(storages))
-	detailsChan := make(chan detailWithIndex, len(storages))
-	workerCount := 0
 	for i, s := range storages {
 		ret[i] = &StorageResp{
 			Storage:      s,
 			MountDetails: nil,
-		}
-		if setting.GetBool(conf.HideStorageDetailsInManagePage) {
-			continue
-		}
-		d, err := op.GetStorageByMountPath(s.MountPath)
-		if err != nil {
-			continue
-		}
-		_, ok := d.(driver.WithDetails)
-		if !ok {
-			continue
-		}
-		workerCount++
-		go func(dri driver.Driver, idx int) {
-			details, e := op.GetStorageDetails(ctx, dri)
-			if e != nil {
-				if !errors.Is(e, errs.NotImplement) && !errors.Is(e, errs.StorageNotInit) {
-					log.Errorf("failed get %s details: %+v", dri.GetStorage().MountPath, e)
-				}
-			}
-			detailsChan <- detailWithIndex{idx: idx, val: details}
-		}(d, i)
-	}
-	for workerCount > 0 {
-		select {
-		case r := <-detailsChan:
-			ret[r.idx].MountDetails = r.val
-			workerCount--
-		case <-time.After(time.Second * 3):
-			workerCount = 0
 		}
 	}
 	return ret
@@ -85,7 +45,7 @@ func ListStorages(c *gin.Context) {
 		return
 	}
 	common.SuccessResp(c, common.PageResp{
-		Content: makeStorageResp(c, storages),
+		Content: makeStorageResp(storages),
 		Total:   total,
 	})
 }

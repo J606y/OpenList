@@ -14,7 +14,7 @@ import (
 )
 
 func Favicon(c *gin.Context) {
-	c.Redirect(302, setting.GetStr(conf.Favicon))
+	c.Redirect(302, "https://res.oplist.org/logo/logo.svg")
 }
 
 func Robots(c *gin.Context) {

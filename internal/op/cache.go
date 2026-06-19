@@ -11,6 +11,11 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
+type objWithLink struct {
+	link *model.Link
+	obj  model.Obj
+}
+
 type CacheManager struct {
 	dirCache     *cache.KeyedCache[*directoryCache]       // Cache for directory listings
 	linkCache    *cache.TypedCache[*objWithLink]          // Cache for file links
@@ -53,14 +58,6 @@ func (cm *CacheManager) deleteDirectoryTree(key string) {
 			}
 		}
 	}
-}
-
-// remove directory from dirCache
-func (cm *CacheManager) DeleteDirectory(storage driver.Driver, dirPath string) {
-	if storage.Config().NoCache {
-		return
-	}
-	cm.dirCache.Delete(Key(storage, dirPath))
 }
 
 // remove object from dirCache.

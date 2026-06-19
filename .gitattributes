@@ -1,0 +1,4 @@
+# Shell scripts must stay LF — CRLF breaks the shebang inside Linux containers
+# (e.g. "exec /entrypoint.sh: no such file or directory").
+*.sh text eol=lf
+entrypoint.sh text eol=lf

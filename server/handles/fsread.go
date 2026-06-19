@@ -44,6 +44,7 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
+	Duration     float64                    `json:"duration,omitempty"` // seconds, 0 if unknown
 }
 
 type FsListResp struct {
@@ -64,11 +65,6 @@ func FsListSplit(c *gin.Context) {
 		return
 	}
 	req.Validate()
-	if strings.HasPrefix(req.Path, "/@s") {
-		req.Path = strings.TrimPrefix(req.Path, "/@s")
-		SharingList(c, &req)
-		return
-	}
 	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user.IsGuest() && user.Disabled {
 		common.ErrorStrResp(c, "Guest user is disabled, login please", 401)
@@ -100,7 +96,7 @@ func FsList(c *gin.Context, req *ListReq, user *model.User) {
 	}
 	objs, err := fs.List(c.Request.Context(), reqPath, &fs.ListArgs{
 		Refresh:            req.Refresh,
-		WithStorageDetails: !user.IsGuest() && !setting.GetBool(conf.HideStorageDetails),
+		WithStorageDetails: false,
 	})
 	if err != nil {
 		common.ErrorResp(c, err, 500)
@@ -267,11 +263,6 @@ func FsGetSplit(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if strings.HasPrefix(req.Path, "/@s") {
-		req.Path = strings.TrimPrefix(req.Path, "/@s")
-		SharingGet(c, &req)
-		return
-	}
 	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user.IsGuest() && user.Disabled {
 		common.ErrorStrResp(c, "Guest user is disabled, login please", 401)
@@ -297,7 +288,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 		return
 	}
 	obj, err := fs.Get(c.Request.Context(), reqPath, &fs.GetArgs{
-		WithStorageDetails: !user.IsGuest() && !setting.GetBool(conf.HideStorageDetails),
+		WithStorageDetails: false,
 	})
 	if err != nil {
 		common.ErrorResp(c, err, 500)
@@ -355,6 +346,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 	}
 	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
+	duration, _ := model.GetDuration(obj)
 	mountDetails, _ := model.GetStorageDetails(obj)
 	common.SuccessResp(c, FsGetResp{
 		ObjResp: ObjResp{
@@ -368,6 +360,7 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 			Sign:         common.Sign(obj, parentPath, isEncrypt(meta, reqPath)),
 			Type:         utils.GetFileType(obj.GetName()),
 			Thumb:        thumb,
+			Duration:     duration,
 			MountDetails: mountDetails,
 		},
 		RawURL:   rawURL,

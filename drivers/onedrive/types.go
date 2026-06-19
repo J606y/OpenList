@@ -40,17 +40,29 @@ type File struct {
 	ParentReference struct {
 		DriveId string `json:"driveId"`
 	} `json:"parentReference"`
+	Video *struct {
+		Duration int64 `json:"duration"` // milliseconds
+	} `json:"video"`
 }
 
 type Object struct {
 	model.ObjThumb
 	ParentID string
+	Duration float64 // seconds
+}
+
+func (o *Object) GetDuration() float64 {
+	return o.Duration
 }
 
 func fileToObj(f File, parentID string) *Object {
 	thumb := ""
 	if len(f.Thumbnails) > 0 {
 		thumb = f.Thumbnails[0].Medium.Url
+	}
+	var duration float64
+	if f.Video != nil {
+		duration = float64(f.Video.Duration) / 1000
 	}
 	return &Object{
 		ObjThumb: model.ObjThumb{
@@ -65,6 +77,7 @@ func fileToObj(f File, parentID string) *Object {
 			//Url:       model.Url{Url: f.Url},
 		},
 		ParentID: parentID,
+		Duration: duration,
 	}
 }
 

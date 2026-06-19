@@ -16,7 +16,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/buffer"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"go4.org/readerutil"
 )
 
 type FileStream struct {
@@ -427,18 +426,6 @@ func NewReadAtSeeker(ss *SeekableStream, offset int64, forceRange ...bool) (mode
 		r.readerMap.Store(int64(offset), ss)
 	}
 	return r, nil
-}
-
-func NewMultiReaderAt(ss []*SeekableStream) (readerutil.SizeReaderAt, error) {
-	readers := make([]readerutil.SizeReaderAt, 0, len(ss))
-	for _, s := range ss {
-		ra, err := NewReadAtSeeker(s, 0)
-		if err != nil {
-			return nil, err
-		}
-		readers = append(readers, io.NewSectionReader(ra, 0, s.GetSize()))
-	}
-	return readerutil.NewMultiReaderAt(readers...), nil
 }
 
 func (r *RangeReadReadAtSeeker) getReaderAtOffset(off int64) (io.Reader, error) {

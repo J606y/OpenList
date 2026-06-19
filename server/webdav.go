@@ -155,11 +155,6 @@ func tryLogin(username, password string) (*model.User, bool) {
 	user, err := op.GetUserByName(username)
 	if err == nil {
 		err = user.ValidateRawPassword(password)
-		if err != nil && setting.GetBool(conf.LdapLoginEnabled) && user.AllowLdap {
-			err = common.HandleLdapLogin(username, password)
-		}
-	} else if setting.GetBool(conf.LdapLoginEnabled) && model.CanWebdavRead(int32(setting.GetInt(conf.LdapDefaultPermission, 0))) {
-		user, err = tryLdapLoginAndRegister(username, password)
 	}
 	return user, err == nil
 }

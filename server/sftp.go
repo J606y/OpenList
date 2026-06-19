@@ -11,7 +11,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/OpenList/v4/server/ftp"
 	"github.com/OpenListTeam/OpenList/v4/server/sftp"
 	"github.com/OpenListTeam/sftpd-openlist"
@@ -103,11 +102,6 @@ func (d *SftpDriver) PasswordAuth(conn ssh.ConnMetadata, password []byte) (*ssh.
 	userObj, err := op.GetUserByName(conn.User())
 	if err == nil {
 		err = userObj.ValidateRawPassword(pass)
-		if err != nil && setting.GetBool(conf.LdapLoginEnabled) && userObj.AllowLdap {
-			err = common.HandleLdapLogin(conn.User(), pass)
-		}
-	} else if setting.GetBool(conf.LdapLoginEnabled) && model.CanFTPAccess(int32(setting.GetInt(conf.LdapDefaultPermission, 0))) {
-		userObj, err = tryLdapLoginAndRegister(conn.User(), pass)
 	}
 	if err != nil {
 		model.LoginCache.Set(ip, count+1)

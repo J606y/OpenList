@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	_189pc "github.com/OpenListTeam/OpenList/v4/drivers/189pc"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -142,99 +141,6 @@ func ParseTorrent(c *gin.Context) {
 	common.SuccessResp(c, resp)
 }
 
-// TorrentRapidUploadReq 从 torrent 秒传请求
-type TorrentRapidUploadReq struct {
-	// TorrentData Base64 编码的 torrent 文件内容
-	TorrentData string `json:"torrent_data" binding:"required"`
-	// Path 目标路径
-	Path string `json:"path" binding:"required"`
-}
-
-// TorrentRapidUpload 从 torrent 文件中提取 CAS 信息尝试秒传到天翼云
-func TorrentRapidUpload(c *gin.Context) {
-	user := c.Request.Context().Value(conf.UserKey).(*model.User)
-
-	var req TorrentRapidUploadReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-
-	reqPath, err := user.JoinPath(req.Path)
-	if err != nil {
-		common.ErrorResp(c, err, 403)
-		return
-	}
-
-	// 检查权限
-	meta, err := op.GetNearestMeta(reqPath)
-	if err != nil && !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-		common.ErrorResp(c, err, 500, true)
-		return
-	}
-	if !common.CanWrite(user, meta, reqPath) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-
-	// Base64 解码
-	torrentData, err := base64.StdEncoding.DecodeString(req.TorrentData)
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("无效的 Base64 编码: %w", err), 400)
-		return
-	}
-
-	// 解析 torrent
-	t, err := torrent.Decode(torrentData)
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("解析 torrent 失败: %w", err), 400)
-		return
-	}
-
-	if !t.HasCASInfo() {
-		common.ErrorResp(c, fmt.Errorf("torrent 不包含 CAS 扩展信息，无法秒传"), 400)
-		return
-	}
-
-	// 获取目标存储
-	storage, dstDirActualPath, err := op.GetStorageAndActualPath(reqPath)
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-
-	// 获取目标目录对象
-	dstDir, err := op.Get(c.Request.Context(), storage, dstDirActualPath)
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("获取目标目录失败: %w", err), 500)
-		return
-	}
-	if !dstDir.IsDir() {
-		common.ErrorResp(c, errs.NotFolder, 400)
-		return
-	}
-
-	// 检查是否是天翼云 PC 驱动
-	cloud189PC, ok := storage.(*_189pc.Cloud189PC)
-	if !ok {
-		common.ErrorResp(c, fmt.Errorf("目标存储不是天翼云PC驱动，不支持 CAS 秒传"), 400)
-		return
-	}
-
-	// 尝试秒传
-	obj, err := cloud189PC.RapidUploadFromTorrent(c.Request.Context(), dstDir, torrentData, true)
-	if err != nil {
-		common.ErrorResp(c, fmt.Errorf("秒传失败: %w", err), 400)
-		return
-	}
-
-	common.SuccessResp(c, gin.H{
-		"message":   "秒传成功",
-		"file_name": obj.GetName(),
-		"file_size": obj.GetSize(),
-	})
-}
-
 // UploadTorrentAndParse 通过文件上传方式解析 torrent
 func UploadTorrentAndParse(c *gin.Context) {
 	file, err := c.FormFile("torrent")
@@ -356,14 +262,6 @@ func GenerateTorrentForPath(c *gin.Context) {
 	if err != nil {
 		common.ErrorResp(c, err, 500)
 		return
-	}
-
-	// with_cas 仅支持天翼云PC驱动
-	if req.WithCAS {
-		if _, is189pc := storage.(*_189pc.Cloud189PC); !is189pc {
-			common.ErrorResp(c, fmt.Errorf("CAS 秒传扩展仅支持天翼云PC驱动"), 400)
-			return
-		}
 	}
 
 	// 获取文件对象

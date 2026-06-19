@@ -1,0 +1,36 @@
+# Dockerfile.custom — 构建嵌入「你的定制前端」的 OpenList 镜像
+#
+# 前提：构建前必须先把你自己 pnpm build 出的前端产物放到 public/dist/
+#   cd ../openlist-frontend && pnpm install && pnpm build
+#   cd ../openlist && rm -rf public/dist && cp -r ../openlist-frontend/dist public/dist
+#
+# 说明：本文件不走 build.sh（那会从 GitHub 拉上游前端覆盖你的 UI），
+#       直接 go build 把 public/dist 里的定制前端嵌进二进制。
+#       slim fork 已移除 jsoniter，故不带 -tags=jsoniter。
+
+FROM golang:1.26-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=custom
+ARG GIT_COMMIT=local
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="\
+    -s -w \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${VERSION}' \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=${GIT_COMMIT}' \
+    -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=custom'" \
+    -o /app/bin/openlist .
+
+FROM alpine:edge
+RUN apk add --no-cache bash ca-certificates tzdata && \
+    addgroup -g 1001 openlist && \
+    adduser -D -u 1001 -G openlist openlist
+WORKDIR /opt/openlist/
+COPY --from=builder --chmod=755 /app/bin/openlist ./
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+ENV UMASK=022 RUN_ARIA2=false
+VOLUME /opt/openlist/data/
+EXPOSE 5244
+CMD [ "/entrypoint.sh" ]

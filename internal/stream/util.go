@@ -121,18 +121,6 @@ func GetRangeReaderFromLink(size int64, link *model.Link) (model.RangeReaderIF, 
 	return RangeReaderFunc(rangeReader), nil
 }
 
-func GetRangeReaderFromMFile(size int64, file model.File) *model.FileRangeReader {
-	return &model.FileRangeReader{
-		RangeReaderIF: RangeReaderFunc(func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-			length := httpRange.Length
-			if length < 0 || httpRange.Start+length > size {
-				length = size - httpRange.Start
-			}
-			return &model.FileCloser{File: io.NewSectionReader(file, httpRange.Start, length)}, nil
-		}),
-	}
-}
-
 // 139 cloud does not properly return 206 http status code, add a hack here
 func checkContentRange(header *http.Header, offset int64) bool {
 	start, _, err := http_range.ParseContentRange(header.Get("Content-Range"))
@@ -143,25 +131,6 @@ func checkContentRange(header *http.Header, offset int64) bool {
 		return true
 	}
 	return false
-}
-
-type ReaderWithCtx struct {
-	io.Reader
-	Ctx context.Context
-}
-
-func (r *ReaderWithCtx) Read(p []byte) (n int, err error) {
-	if utils.IsCanceled(r.Ctx) {
-		return 0, r.Ctx.Err()
-	}
-	return r.Reader.Read(p)
-}
-
-func (r *ReaderWithCtx) Close() error {
-	if c, ok := r.Reader.(io.Closer); ok {
-		return c.Close()
-	}
-	return nil
 }
 
 func CacheFullAndHash(stream model.FileStreamer, up *model.UpdateProgress, hashType *utils.HashType, hashParams ...any) (model.File, string, error) {

@@ -71,8 +71,6 @@ type TasksConfig struct {
 	Upload             TaskConfig `json:"upload" envPrefix:"UPLOAD_"`
 	Copy               TaskConfig `json:"copy" envPrefix:"COPY_"`
 	Move               TaskConfig `json:"move" envPrefix:"MOVE_"`
-	Decompress         TaskConfig `json:"decompress" envPrefix:"DECOMPRESS_"`
-	DecompressUpload   TaskConfig `json:"decompress_upload" envPrefix:"DECOMPRESS_UPLOAD_"`
 	AllowRetryCanceled bool       `json:"allow_retry_canceled" env:"ALLOW_RETRY_CANCELED"`
 }
 
@@ -80,12 +78,6 @@ type Cors struct {
 	AllowOrigins []string `json:"allow_origins" env:"ALLOW_ORIGINS"`
 	AllowMethods []string `json:"allow_methods" env:"ALLOW_METHODS"`
 	AllowHeaders []string `json:"allow_headers" env:"ALLOW_HEADERS"`
-}
-
-type S3 struct {
-	Enable bool `json:"enable" env:"ENABLE"`
-	Port   int  `json:"port" env:"PORT"`
-	SSL    bool `json:"ssl" env:"SSL"`
 }
 
 type FTP struct {
@@ -128,7 +120,6 @@ type Config struct {
 	TlsInsecureSkipVerify bool        `json:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
 	Tasks                 TasksConfig `json:"tasks" envPrefix:"TASKS_"`
 	Cors                  Cors        `json:"cors" envPrefix:"CORS_"`
-	S3                    S3          `json:"s3" envPrefix:"S3_"`
 	FTP                   FTP         `json:"ftp" envPrefix:"FTP_"`
 	SFTP                  SFTP        `json:"sftp" envPrefix:"SFTP_"`
 	LastLaunchedVersion   string      `json:"last_launched_version"`
@@ -207,26 +198,12 @@ func DefaultConfig(dataDir string) *Config {
 				MaxRetry: 2,
 				// TaskPersistant: true,
 			},
-			Decompress: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-				// TaskPersistant: true,
-			},
-			DecompressUpload: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-			},
 			AllowRetryCanceled: false,
 		},
 		Cors: Cors{
 			AllowOrigins: []string{"*"},
 			AllowMethods: []string{"*"},
 			AllowHeaders: []string{"*"},
-		},
-		S3: S3{
-			Enable: false,
-			Port:   5246,
-			SSL:    false,
 		},
 		FTP: FTP{
 			Enable:                  false,

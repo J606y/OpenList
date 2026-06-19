@@ -12,6 +12,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/net"
+	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/internal/sign"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -23,6 +24,16 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 	// 	http.ServeContent(w, r, file.GetName(), file.ModTime(), link.MFile)
 	// 	return nil
 	// }
+
+	// 多线程代理转发：对支持 Range 的远程直链注入并发分片下载，避免单连接被上游限速。
+	// 仅当驱动未自行指定并发、且是非本机 API 的远程 URL 时生效；小文件由下载器自动降为单线程。
+	if link.RangeReader == nil && link.Concurrency == 0 && link.PartSize == 0 &&
+		len(link.URL) > 0 && !strings.HasPrefix(link.URL, GetApiUrl(r.Context())+"/") {
+		if concurrency := setting.GetInt(conf.ProxyDownloadConcurrency, 0); concurrency > 1 {
+			link.Concurrency = concurrency
+			link.PartSize = net.DefaultDownloadPartSize
+		}
+	}
 
 	if link.Concurrency > 0 || link.PartSize > 0 {
 		attachHeader(w, file, link)

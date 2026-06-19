@@ -57,6 +57,10 @@ require_apt() {
     fi
 }
 
+# 通过 curl|bash 运行时 stdin 是管道而非键盘：read -rp 不显示提示、且会卡住/读到 EOF
+# （表现为“输入后直接卡死”）。把交互输入接回控制终端即可。
+ensure_tty() { [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; }; return 0; }
+
 # 安装快捷命令：把脚本拷到 /usr/local/bin，并创建命令 n。
 # 每次启动调用：已安装则静默（顺便更新脚本本体），首次安装则提示。
 setup_shortcut() {
@@ -119,6 +123,67 @@ open_firewall() {
     else
         warn "未检测到受支持的防火墙，跳过。请自行确认 80/443 已放行。"
     fi
+}
+
+# ------------------- 后端端口直连封锁（仅经域名/Nginx 访问） -----------------
+# 反代建好后，常希望禁止公网再用 http://IP:端口 直连后端（如 OpenList 5244）。
+# 做法：iptables 丢弃「非回环」入站到该端口的流量，保留 lo 让 Nginx(127.0.0.1) 仍可访问。
+# 注意：Docker 发布的端口（compose 里 5244:5244）走 DOCKER-USER 链，绕过 INPUT/ufw，
+#       所以必须同时在 DOCKER-USER 链下规则，否则封不住。
+
+# 需要操作的链：DOCKER-USER（存在则优先，管 Docker 发布端口）+ INPUT（管本机服务）
+_iptables_block_chains() {
+    iptables -nL DOCKER-USER >/dev/null 2>&1 && echo DOCKER-USER
+    echo INPUT
+}
+
+# 任一链已存在 DROP 规则即视为已封锁
+backend_port_blocked() {
+    local port="$1" ch
+    for ch in $(_iptables_block_chains); do
+        iptables -C "$ch" -p tcp --dport "$port" ! -i lo -j DROP 2>/dev/null && return 0
+    done
+    return 1
+}
+
+restrict_port() {
+    local port="$1" ch
+    command -v iptables >/dev/null 2>&1 || {
+        warn "未找到 iptables，跳过。请用云安全组/防火墙封锁端口 $port 的公网入站。"; return 0; }
+    for ch in $(_iptables_block_chains); do
+        iptables -C "$ch" -p tcp --dport "$port" ! -i lo -j DROP 2>/dev/null || \
+            iptables -I "$ch" 1 -p tcp --dport "$port" ! -i lo -j DROP
+    done
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1
+    ok "已封锁公网直连 :$port（保留本机回环，Nginx 反代不受影响）"
+    warn "云厂商安全组/安全列表（Oracle / 阿里云等）需另在控制台收紧，本脚本只改本机 iptables。"
+}
+
+unrestrict_port() {
+    local port="$1" ch
+    command -v iptables >/dev/null 2>&1 || return 0
+    for ch in $(_iptables_block_chains); do
+        while iptables -C "$ch" -p tcp --dport "$port" ! -i lo -j DROP 2>/dev/null; do
+            iptables -D "$ch" -p tcp --dport "$port" ! -i lo -j DROP
+        done
+    done
+    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1
+    ok "已解除端口 $port 的公网直连封锁"
+}
+
+# 从反代目标解析端口并校验是否本机，再封锁
+restrict_backend_port() {
+    local target="$1" hp host port
+    hp="${target#*://}"; hp="${hp%%/*}"     # 去掉 scheme 和路径 -> host[:port]
+    host="${hp%%:*}"; port="${hp##*:}"
+    [ "$host" = "$port" ] && port=""        # 没写端口
+    case "$target" in https://*) port="${port:-443}" ;; *) port="${port:-80}" ;; esac
+    case "$host" in
+        127.0.0.1|localhost|::1|0.0.0.0) ;;
+        *) warn "反代目标 $host 不在本机，无法在此封锁端口 $port。"
+           warn "请到后端所在主机上操作，或把后端端口仅绑定 127.0.0.1。"; return 0 ;;
+    esac
+    restrict_port "$port"
 }
 
 # ----------------------------- 全局配置 -------------------------------------
@@ -384,7 +449,7 @@ configure_reverse_proxy() {
     command -v nginx >/dev/null 2>&1 || { err "请先安装 Nginx（菜单 1）"; pause; return; }
     ensure_global_conf
 
-    local domain target maxbody
+    local domain target maxbody created=0
     read -rp "请输入域名（如 v.example.com）: " domain
     [ -z "$domain" ] && { err "域名不能为空"; pause; return; }
     read -rp "请输入反代目标（如 http://127.0.0.1:5244）: " target
@@ -404,7 +469,7 @@ configure_reverse_proxy() {
     case "$s" in
         4)
             render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "none" "" ""
-            reload_nginx && ok "已创建（仅 HTTP）：http://$domain"
+            reload_nginx && { ok "已创建（仅 HTTP）：http://$domain"; created=1; }
             ;;
         3)
             local crt key
@@ -412,7 +477,7 @@ configure_reverse_proxy() {
             read -rp "  私钥 key 路径: " key
             if [ ! -f "$crt" ] || [ ! -f "$key" ]; then err "证书文件不存在"; pause; return; fi
             render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "file" "$crt" "$key"
-            reload_nginx && ok "已创建（HTTPS，自带证书）：https://$domain"
+            reload_nginx && { ok "已创建（HTTPS，自带证书）：https://$domain"; created=1; }
             ;;
         2)
             echo "    DNS 服务商： 1) Cloudflare  2) 阿里云  3) 腾讯云(DNSPod)"
@@ -421,7 +486,7 @@ configure_reverse_proxy() {
             if issue_cert_dns "$domain" "$prov" && install_cert_to_nginx "$domain"; then
                 render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "dns" \
                     "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
-                reload_nginx && ok "已创建（HTTPS + 泛域名证书）：https://$domain"
+                reload_nginx && { ok "已创建（HTTPS + 泛域名证书）：https://$domain"; created=1; }
             else
                 err "证书申请失败，未创建 HTTPS 站点。"
             fi
@@ -430,6 +495,7 @@ configure_reverse_proxy() {
             # 先建 HTTP 站点以承载 acme challenge，再签发，最后换成 HTTPS
             render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "none" "" ""
             reload_nginx || { err "初始 HTTP 配置失败"; pause; return; }
+            created=1
             if issue_cert_http "$domain" && install_cert_to_nginx "$domain"; then
                 render_site_file "$domain" "$target" "$maxbody" "$CACHE_MODE" "le" \
                     "$CERT_DIR/$domain/fullchain.pem" "$CERT_DIR/$domain/key.pem"
@@ -439,6 +505,20 @@ configure_reverse_proxy() {
             fi
             ;;
     esac
+
+    # 反代建好后，询问是否封锁公网经 IP:端口 直连后端（仅当目标在本机时有意义）
+    if [ "$created" = 1 ]; then
+        local _hp _host
+        _hp="${target#*://}"; _hp="${_hp%%/*}"; _host="${_hp%%:*}"
+        case "$_host" in
+            127.0.0.1|localhost|::1|0.0.0.0)
+                echo
+                local _yn
+                read -rp "是否关闭通过 IP:端口 直连后端，仅允许经域名/Nginx 访问？(y/N): " _yn
+                case "$_yn" in y|Y) restrict_backend_port "$target" ;; esac
+                ;;
+        esac
+    fi
     pause
 }
 
@@ -552,6 +632,24 @@ uninstall_nginx() {
     pause
 }
 
+# ------------------- 后端端口直连封锁开关 -----------------------------------
+port_block_menu() {
+    echo "后端端口直连封锁：禁止公网用 IP:端口 直连后端（保留本机回环给 Nginx）"
+    local port; read -rp "  输入后端端口（如 5244，回车返回）: " port
+    [ -z "$port" ] && return
+    case "$port" in *[!0-9]*) err "端口需为数字"; pause; return ;; esac
+    if backend_port_blocked "$port"; then
+        warn "端口 $port 当前【已封锁】公网直连"
+        local yn; read -rp "  解除封锁？(y/N): " yn
+        case "$yn" in y|Y) unrestrict_port "$port" ;; esac
+    else
+        info "端口 $port 当前【未封锁】"
+        local yn; read -rp "  现在封锁？(y/N): " yn
+        case "$yn" in y|Y) restrict_port "$port" ;; esac
+    fi
+    pause
+}
+
 # ----------------------------- 管理子菜单 -----------------------------------
 manage_menu() {
     while true; do
@@ -559,12 +657,14 @@ manage_menu() {
         c_green "------------- 管理反向代理 -------------"
         echo "  1. 管理已配置站点（改目标 / 改缓存 / 换证书 / 删除）"
         echo "  2. 证书 / 自动续签管理"
+        echo "  3. 后端端口直连封锁（开 / 关）"
         echo "  0. 返回上级"
         echo "----------------------------------------"
-        local op; read -rp "请选择 [0-2]: " op
+        local op; read -rp "请选择 [0-3]: " op
         case "$op" in
             1) manage_reverse_proxy ;;
             2) cert_menu ;;
+            3) port_block_menu ;;
             0) return ;;
             *) warn "无效选项"; sleep 1 ;;
         esac
@@ -600,5 +700,6 @@ main_menu() {
 
 require_root
 require_apt
+ensure_tty
 setup_shortcut
 main_menu

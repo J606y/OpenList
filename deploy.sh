@@ -43,7 +43,7 @@ ensure_node(){
   if command -v node >/dev/null 2>&1 && [ "$(node -v | sed 's/v//;s/\..*//')" -ge 18 ]; then return; fi
   log "安装 Node.js 22..."
   command -v apt-get >/dev/null 2>&1 || die "未检测到 apt；请自行安装 Node.js>=18 后重跑"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash -
+  curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO bash -
   $SUDO apt-get install -y nodejs
 }
 

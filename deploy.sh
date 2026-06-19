@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # OpenList 定制 fork —— 部署/管理脚本（Docker + 原生前端构建）
 #
-# 首次安装：
+# 首次安装（全新服务器执行；有终端时会弹出管理面板，选 1 安装）：
 #   curl -fsSL https://raw.githubusercontent.com/J606y/OpenList/feat/slim-storage/deploy.sh | bash
+#   ↑ 若想更稳地弹出菜单，可改用： bash <(curl -fsSL .../deploy.sh)
+#     （无控制终端的纯管道环境如 cloud-init，会自动跳过菜单直接安装）
 # 安装后（会软链到 /usr/local/bin/openlist），随处可用：
+#   openlist              打开交互管理面板（推荐）
 #   openlist update       更新代码并重建
 #   openlist restart      重启容器
 #   openlist stop|start   停止 / 启动
@@ -36,6 +39,16 @@ warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 DOCKER="docker"
+
+# curl|bash 时脚本占用了 stdin，read 读不到键盘输入；若存在控制终端则接管它，让菜单可交互。
+ensure_tty(){ [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; }; return 0; }
+is_installed(){ [ -d "$BACKEND_DIR/.git" ]; }
+# 菜单内的非致命“需已安装”守卫（区别于会 exit 的 require_install）
+need_install(){ is_installed || { warn "尚未安装，请先选择 1) 安装 / 重新部署"; return 1; }; }
+# 选 docker 调用方式而不 die（菜单用），失败仅 return 1
+pick_docker(){ command -v docker >/dev/null 2>&1 || { warn "未检测到 docker，请先安装/部署"; return 1; }; docker info >/dev/null 2>&1 && DOCKER="docker" || DOCKER="$SUDO docker"; return 0; }
+# 在 fail-fast 子shell中执行过程性命令：失败只回到菜单，而不退出整个脚本
+run(){ ( set -e; "$@" ); }
 
 set_docker(){ command -v docker >/dev/null 2>&1 || die "docker 未安装，请先安装"; DOCKER="docker"; docker info >/dev/null 2>&1 || DOCKER="$SUDO docker"; }
 ensure_git(){ command -v git >/dev/null 2>&1 || { log "安装 git..."; $SUDO apt-get update && $SUDO apt-get install -y git || die "请先装 git"; }; }
@@ -83,10 +96,23 @@ cmd_install(){
   $SUDO ln -sf "$BACKEND_DIR/deploy.sh" /usr/local/bin/openlist 2>/dev/null || true
   chmod +x "$BACKEND_DIR/deploy.sh" 2>/dev/null || true
   echo; log "部署完成。"; compose ps; echo
-  log "首次启动账号信息："; sleep 3; compose logs openlist 2>&1 | grep -iE 'admin|password' | tail -5 || true
-  echo; log "直接输入  openlist  打开交互菜单（数字 1-9 控制）"
-  log "或子命令： openlist update|restart|stop|start|status|logs|uninstall"
-  warn "5244 别开公网，只放行边缘 IP，由 nginx 反代(proxy_buffering off)。"
+  # 读取首次启动生成的随机管理员密码（轮询日志，最多 ~25s 等服务初始化）
+  log "读取管理员账号（首次启动会生成随机密码）..."
+  local _logs="" _i
+  for ((_i=1;_i<=25;_i++)); do
+    _logs="$(compose logs openlist 2>&1 || true)"
+    echo "$_logs" | grep -qiE 'password|admin' && break
+    sleep 1
+  done
+  echo "$_logs" | grep -iE 'username|password|admin|初始' | tail -8 \
+    || warn "未捕获到账号日志；若非首次启动属正常，可用菜单 8) 重设管理员密码。"
+  # 探测访问 IP（公网优先，失败回退内网网卡 IP）
+  local _ip; _ip="$(curl -fsS4 --max-time 5 ifconfig.me 2>/dev/null || true)"
+  [ -z "$_ip" ] && _ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -z "$_ip" ] && _ip="<服务器IP>"
+  echo; log "访问地址：  http://${_ip}:5244"
+  log "再次管理：  输入  openlist  打开本面板（或 openlist update|restart|logs|status ...）"
+  warn "5244 别直接开公网，建议只放行边缘/反代 IP，用 nginx 反代（见 nginx-rp.sh）。"
 }
 cmd_update(){ require_install; set_docker; ensure_node; ensure_pnpm
   clone_or_pull "$BACKEND_REPO"  "$BACKEND_DIR" "$BRANCH"
@@ -115,38 +141,48 @@ cmd_uninstall(){ require_install; set_docker
 }
 
 menu(){
-  require_install; set_docker
+  ensure_tty
+  set +e   # 交互菜单：单个操作失败只回到菜单，不退出整个脚本
   while true; do
-    printf '\n  \033[1;36mOpenList 管理\033[0m  (%s)\n' "$BACKEND_DIR"
+    local st
+    if is_installed; then st=$'\033[1;32m● 已安装\033[0m'; else st=$'\033[1;33m○ 未安装\033[0m'; fi
+    printf '\n  \033[1;36mOpenList 管理面板\033[0m   %b\n  \033[2m%s\033[0m\n' "$st" "$BASE_DIR"
     cat <<'M'
   ──────────────────────────────
-   1) 更新（拉代码 + 重建）
-   2) 重启     3) 停止     4) 启动
-   5) 状态     6) 日志（近200行）
-   7) 重设管理员密码
-   8) 卸载（保留数据）   9) 彻底卸载（删数据+代码）
+   1) 安装 / 重新部署   （拉取最新代码 + 构建 + 启动）
+
+   2) 更新            3) 重启
+   4) 停止            5) 启动
+   6) 状态            7) 日志（近200行）
+   8) 重设管理员密码
+   9) 卸载（保留数据）   10) 彻底卸载（删数据+代码）
    0) 退出
+  ──────────────────────────────
 M
-    printf "  请选择: "; read -r ans || exit 0
+    printf "  请选择: "; read -r ans || { echo; exit 0; }
     case "$ans" in
-      1) cmd_update ;;
-      2) cmd_restart ;;
-      3) cmd_stop ;;
-      4) cmd_start ;;
-      5) compose ps ;;
-      6) compose logs --tail=200 ;;
-      7) printf "  新密码: "; read -r pw; if [ -n "${pw:-}" ]; then compose exec openlist ./openlist admin set "$pw"; else warn "已取消"; fi ;;
-      8) cmd_uninstall ;;
-      9) cmd_uninstall --purge; exit 0 ;;
+      1)  run cmd_install || warn "安装/部署失败，请查看上方错误输出" ;;
+      2)  if need_install; then run cmd_update  || warn "更新失败"; fi ;;
+      3)  if need_install; then run cmd_restart || warn "重启失败"; fi ;;
+      4)  if need_install; then run cmd_stop    || warn "停止失败"; fi ;;
+      5)  if need_install; then run cmd_start   || warn "启动失败"; fi ;;
+      6)  if need_install && pick_docker; then compose ps; fi ;;
+      7)  if need_install && pick_docker; then compose logs --tail=200; fi ;;
+      8)  if need_install && pick_docker; then
+            printf "  新管理员密码: "; read -r pw
+            if [ -n "${pw:-}" ]; then compose exec openlist ./openlist admin set "$pw" && log "密码已更新"; else warn "已取消"; fi
+          fi ;;
+      9)  if need_install; then run cmd_uninstall || warn "卸载失败"; fi ;;
+      10) if need_install; then run cmd_uninstall --purge && exit 0 || warn "卸载失败"; fi ;;
       0|q|Q) echo "  再见"; exit 0 ;;
       *) warn "无效选择: $ans"; continue ;;
     esac
-    printf "\n  \033[2m按回车返回菜单...\033[0m"; read -r _ || exit 0
+    printf "\n  \033[2m按回车返回菜单...\033[0m"; read -r _ || { echo; exit 0; }
   done
 }
 
 case "${1:-}" in
-  "")  if [ -d "$BACKEND_DIR/.git" ] && [ -t 0 ]; then menu; else cmd_install; fi ;;
+  "")  ensure_tty; if [ -t 0 ]; then menu; else cmd_install; fi ;;
   install)        cmd_install ;;
   update|upgrade) cmd_update ;;
   restart)        cmd_restart ;;
@@ -157,6 +193,6 @@ case "${1:-}" in
   exec)           shift; cmd_exec "$@" ;;
   uninstall|remove) shift; cmd_uninstall "${1:-}" ;;
   menu)           menu ;;
-  -h|--help|help) echo "用法: openlist [menu|install|update|restart|stop|start|status|logs|uninstall [--purge]]；无参数且已安装→打开交互菜单" ;;
+  -h|--help|help) echo "用法: openlist [menu|install|update|restart|stop|start|status|logs|uninstall [--purge]]；无参数→打开交互管理面板（未安装也可在面板内选 1 安装）" ;;
   *) die "未知命令: $1（openlist --help 查看用法）" ;;
 esac

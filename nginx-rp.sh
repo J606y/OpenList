@@ -30,6 +30,8 @@ REQUIRED_PORTS=(80 443)
 INSTALL_PATH="/usr/local/bin/nginx-rp.sh"
 SHORTCUT_CMD="n"
 SHORTCUT_PATH="/usr/local/bin/$SHORTCUT_CMD"
+# 自更新地址（菜单「更新本脚本」用）。GitHub raw 有约 5 分钟缓存。
+RAW_URL="https://raw.githubusercontent.com/J606y/OpenList/feat/slim-storage/nginx-rp.sh"
 
 # ----------------------------- 颜色输出 -------------------------------------
 c_red()   { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -91,6 +93,27 @@ EOF
     ok "快捷命令安装成功！以后在任意目录输入  $SHORTCUT_CMD  即可打开本菜单。"
     echo "  脚本已安装到：$INSTALL_PATH"
     pause
+}
+
+# 从 GitHub 拉最新脚本覆盖安装路径并重启自身。
+# 解决「n 快捷命令永远跑旧版」的问题（脚本本体不会自更新）。
+self_update() {
+    command -v curl >/dev/null 2>&1 || { err "需要 curl"; pause; return; }
+    local tmp; tmp="$(mktemp)"
+    info "从 GitHub 拉取最新脚本（raw 有约 5 分钟缓存，刚推送可能要稍等）..."
+    if ! curl -fsSL "$RAW_URL" -o "$tmp"; then
+        err "下载失败，检查网络。"; rm -f "$tmp"; pause; return
+    fi
+    if ! bash -n "$tmp" 2>/dev/null; then
+        err "下载到的脚本语法不通过，已放弃（可能拉到旧缓存/半截文件）。"; rm -f "$tmp"; pause; return
+    fi
+    if cp -f "$tmp" "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"; then
+        rm -f "$tmp"
+        ok "已更新到最新版，正在重启脚本..."; sleep 1
+        exec bash "$INSTALL_PATH"
+    else
+        err "写入 $INSTALL_PATH 失败（需 root）。"; rm -f "$tmp"; pause
+    fi
 }
 
 reload_nginx() {
@@ -797,15 +820,17 @@ main_menu() {
         echo "  2. 配置反向代理"
         echo "  3. 管理反向代理"
         echo "  4. 卸载 Nginx"
+        echo "  5. 更新本脚本（拉 GitHub 最新）"
         echo "  0. 退出"
         echo "----------------------------------"
         echo "  提示：下次直接输入  $SHORTCUT_CMD  即可打开本菜单"
-        local opt; read -rp "请选择一个选项 [0-4]: " opt
+        local opt; read -rp "请选择一个选项 [0-5]: " opt
         case "$opt" in
             1) install_nginx ;;
             2) configure_reverse_proxy ;;
             3) manage_menu ;;
             4) uninstall_nginx ;;
+            5) self_update ;;
             0) exit 0 ;;
             *) warn "无效选项"; sleep 1 ;;
         esac

@@ -65,34 +65,51 @@ require_apt() {
 ensure_tty() { [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; }; return 0; }
 
 # 安装快捷命令：把脚本拷到 /usr/local/bin，并创建命令 n。
-# 每次启动调用：已安装则静默（顺便更新脚本本体），首次安装则提示。
+# 每次启动调用：已安装则静默（顺便更新脚本本体/刷新启动器），首次安装则提示。
 setup_shortcut() {
     local self
     self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
-    # 把（可能在仓库目录里运行的）脚本安装/更新到固定路径
+    # 把脚本本体安装/更新到固定路径：
+    #  - 正常以文件运行（self 是真实文件）→ 直接拷贝；
+    #  - 通过 curl|bash 运行（self 不是真实文件）且本体还不存在 → 从 GitHub 拉一份，
+    #    避免装出一个指向不存在文件的悬空快捷命令（曾导致 n: No such file or directory）。
     if [ -n "$self" ] && [ -f "$self" ] && [ "$self" != "$INSTALL_PATH" ]; then
         cp -f "$self" "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"
+    elif [ ! -f "$INSTALL_PATH" ]; then
+        if command -v curl >/dev/null 2>&1 && curl -fsSL "$RAW_URL" -o "$INSTALL_PATH" 2>/dev/null \
+           && bash -n "$INSTALL_PATH" 2>/dev/null; then
+            chmod +x "$INSTALL_PATH"
+        else
+            rm -f "$INSTALL_PATH" 2>/dev/null   # 没拉成功就别留半截文件
+        fi
     fi
 
-    # 已存在快捷命令
-    if [ -e "$SHORTCUT_PATH" ]; then
-        grep -q "nginx-rp" "$SHORTCUT_PATH" 2>/dev/null || \
-            warn "命令「$SHORTCUT_CMD」已被占用（非本脚本），跳过创建。可改用其它名字（编辑脚本顶部 SHORTCUT_CMD）。"
+    # 没有可用的脚本本体就不创建快捷命令，否则又会装出悬空的 n
+    [ -f "$INSTALL_PATH" ] || return 0
+
+    # 快捷命令被别的程序占用则跳过（只认我们自己写的）
+    if [ -e "$SHORTCUT_PATH" ] && ! grep -q "nginx-rp" "$SHORTCUT_PATH" 2>/dev/null; then
+        warn "命令「$SHORTCUT_CMD」已被占用（非本脚本），跳过创建。可改名（编辑脚本顶部 SHORTCUT_CMD）。"
         return 0
     fi
 
-    # 首次创建快捷命令
+    # 创建/刷新启动器（每次重写，确保旧版启动器也能用上最新逻辑，并自愈悬空 n）。
+    # 非 root 调用时自动 sudo 提权——脚本需要 root，否则会被 require_root 直接挡掉。
+    local first=1; [ -e "$SHORTCUT_PATH" ] && first=0
     cat > "$SHORTCUT_PATH" <<EOF
 #!/bin/bash
-# nginx-rp 快捷启动器
+# nginx-rp 快捷启动器（非 root 自动 sudo 提权）
+if [ "\$(id -u)" -ne 0 ]; then exec sudo bash "$INSTALL_PATH" "\$@"; fi
 exec bash "$INSTALL_PATH" "\$@"
 EOF
     chmod +x "$SHORTCUT_PATH"
-    clear
-    ok "快捷命令安装成功！以后在任意目录输入  $SHORTCUT_CMD  即可打开本菜单。"
-    echo "  脚本已安装到：$INSTALL_PATH"
-    pause
+    if [ "$first" = 1 ]; then
+        clear
+        ok "快捷命令安装成功！以后在任意目录输入  $SHORTCUT_CMD  即可打开本菜单。"
+        echo "  脚本已安装到：$INSTALL_PATH"
+        pause
+    fi
 }
 
 # 从 GitHub 拉最新脚本覆盖安装路径并重启自身。
@@ -116,16 +133,41 @@ self_update() {
     fi
 }
 
+# 重载 nginx：兼容三种情况——① systemd 托管；② 手动/其它方式起的「野」nginx；
+# ③ 当前没运行。不依赖 /run/nginx.pid（野进程常常没写它，导致 nginx -s reload
+# 报 invalid PID），而是直接定位正在运行的 master 进程发 HUP 重载（零停机）。
 reload_nginx() {
-    if nginx -t 2>/tmp/nginx_test.log; then
-        systemctl reload nginx 2>/dev/null || nginx -s reload
-        ok "Nginx 配置已重载"
-        return 0
-    else
+    if ! nginx -t 2>/tmp/nginx_test.log; then
         err "Nginx 配置测试失败，未重载。错误如下："
         cat /tmp/nginx_test.log
         return 1
     fi
+
+    # 找到正在运行的 master（pid 文件优先，陈旧则回退到进程扫描）
+    local mpid
+    mpid="$(cat /run/nginx.pid 2>/dev/null)"
+    [ -n "$mpid" ] && ! kill -0 "$mpid" 2>/dev/null && mpid=""
+    [ -z "$mpid" ] && mpid="$(pgrep -o -x nginx 2>/dev/null)"
+
+    # ① systemd 正好管着这个 master → 用 systemd reload（状态最干净）
+    if [ -n "$mpid" ] && systemctl is-active --quiet nginx 2>/dev/null \
+       && [ "$(systemctl show -p MainPID --value nginx 2>/dev/null)" = "$mpid" ]; then
+        systemctl reload nginx && { ok "Nginx 已重载（systemd）"; return 0; }
+    fi
+
+    # ② 有在跑的 master 但不归 systemd 管 → 直接 HUP 它重载，不碰 pid 文件
+    if [ -n "$mpid" ] && kill -0 "$mpid" 2>/dev/null; then
+        kill -HUP "$mpid" && { ok "Nginx 已重载（HUP master $mpid）"; return 0; }
+    fi
+
+    # ③ 当前没运行 → 启动（优先 systemd，回退裸命令）
+    if systemctl start nginx 2>/dev/null || nginx 2>/dev/null; then
+        ok "Nginx 已启动"
+        return 0
+    fi
+
+    err "Nginx 重载/启动失败。"
+    return 1
 }
 
 # ----------------------------- 防火墙 ---------------------------------------
@@ -317,7 +359,7 @@ EOF
 # ----------------------------- 安装 Nginx -----------------------------------
 install_nginx() {
     if command -v nginx >/dev/null 2>&1; then
-        warn "Nginx 已安装：$(nginx -v 2>&1)"
+        warn "检测到本机已有 Nginx：$(nginx -v 2>&1)，不再重复安装。"
     else
         info "更新软件源并安装 Nginx..."
         apt-get update -y && apt-get install -y nginx
@@ -333,26 +375,82 @@ install_nginx() {
 
     ensure_global_conf
     open_firewall
-    systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx
-    reload_nginx
+
+    # 关键：已有正在运行的 nginx（含 Docker / 手动起的）就【绝不再起第二个】，
+    # 否则会抢 80/443 导致 systemd 启动失败。只平滑重载让新配置生效。
+    if pgrep -x nginx >/dev/null 2>&1; then
+        warn "已有正在运行的 Nginx，跳过启动（避免抢占 80/443），仅重载使配置生效。"
+        reload_nginx
+    else
+        systemctl enable nginx >/dev/null 2>&1
+        systemctl start nginx 2>/dev/null || nginx
+        reload_nginx
+    fi
     ok "Nginx 就绪"
     pause
 }
 
 # ----------------------------- 确保 acme.sh ---------------------------------
+# 邮箱格式校验：local@domain.tld，且排除保留/不可投递域名（localhost/.local/.test...）。
+# Let's Encrypt 会对 contact 邮箱做解析校验，非法地址会以 invalidContact 拒绝注册。
+valid_email() {
+    local e="$1"
+    local re='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    [[ "$e" =~ $re ]] || return 1
+    case "${e##*@}" in
+        localhost|*.local|*.localhost|*.internal|*.example|*.test|*.invalid) return 1 ;;
+    esac
+    return 0
+}
+
+# 是否已成功注册过 Let's Encrypt 账户（ca.conf 里存有真实 ACCOUNT_URL 才算数）。
+le_account_registered() {
+    grep -rqs "ACCOUNT_URL='http" "$ACME_HOME/ca/acme-v02.api.letsencrypt.org" 2>/dev/null
+}
+
+# 注册 Let's Encrypt 账户。邮箱可选：
+#  - 传入合法邮箱 → 带 -m 注册；失败（如 invalidContact）则自动回退到「无邮箱」重试。
+#  - 无邮箱 → 先清掉 account.conf 里可能残留的脏邮箱，再匿名注册（LE 已停发到期邮件，完全 OK）。
+# 返回 0 成功 / 1 失败。
+register_le_account() {
+    local email="$1"
+    if [ -n "$email" ] && "$ACME" --register-account -m "$email" --server letsencrypt; then
+        return 0
+    fi
+    [ -n "$email" ] && warn "用邮箱注册失败，改用「无邮箱」方式重试..."
+    # 清掉残留脏邮箱：account.conf 与各 CA 的 ca.conf(CA_EMAIL) 都要清——
+    # acme.sh 注册前会把邮箱写进 ca.conf，只清 account.conf 会被它反复捞回来用，
+    # 导致 invalidContact 一直复现。
+    sed -i '/EMAIL=/d' "$ACME_HOME/account.conf" 2>/dev/null
+    find "$ACME_HOME/ca" -name ca.conf -exec sed -i '/EMAIL=/d' {} + 2>/dev/null
+    "$ACME" --register-account --server letsencrypt
+}
+
 # 证书功能首次使用时自动安装 acme.sh（含自动续签 cron）。返回 0 成功 / 1 失败。
 ensure_acme() {
     if [ -f "$ACME" ]; then
         "$ACME" --set-default-ca --server letsencrypt >/dev/null 2>&1
+        # acme.sh 已装但账户没注册成功（例如上次填了坏邮箱）→ 在这里补注册，
+        # 否则会等到 --issue 时才报 invalidContact。
+        if ! le_account_registered; then
+            register_le_account "" >/dev/null 2>&1 || \
+                { err "Let's Encrypt 账户注册失败，请检查网络后重试。"; return 1; }
+        fi
         return 0
     fi
     info "首次使用证书功能，自动安装 acme.sh..."
     apt-get install -y curl socat >/dev/null 2>&1
     local email
-    read -rp "请输入用于注册 Let's Encrypt 的邮箱（接收到期提醒）: " email
-    [ -z "$email" ] && { err "邮箱不能为空"; return 1; }
-    curl -fsSL https://get.acme.sh | sh -s email="$email"
+    read -rp "接收证书到期提醒的邮箱（Let's Encrypt 已停发提醒邮件，可直接回车跳过）: " email
+    if [ -n "$email" ] && ! valid_email "$email"; then
+        warn "邮箱格式无效或为保留域名，将以「无邮箱」方式注册。"
+        email=""
+    fi
+    if [ -n "$email" ]; then
+        curl -fsSL https://get.acme.sh | sh -s email="$email"
+    else
+        curl -fsSL https://get.acme.sh | sh
+    fi
     if [ ! -f "$ACME" ]; then
         err "acme.sh 安装失败，请检查网络。"
         return 1
@@ -360,7 +458,12 @@ ensure_acme() {
     # 默认 CA 用 Let's Encrypt（避免 ZeroSSL 需要 EAB 注册）；安装即自带续签 cron
     "$ACME" --set-default-ca --server letsencrypt >/dev/null 2>&1
     "$ACME" --upgrade --auto-upgrade >/dev/null 2>&1
-    ok "acme.sh 就绪；自动续签 cron 已自动安装"
+    # 显式注册账户：把 invalidContact 之类问题在这里就暴露/兜底，而不是拖到签发时才炸
+    if ! register_le_account "$email"; then
+        err "Let's Encrypt 账户注册失败，请检查网络后重试。"
+        return 1
+    fi
+    ok "acme.sh 就绪；Let's Encrypt 账户已注册；自动续签 cron 已安装"
     return 0
 }
 
@@ -404,7 +507,7 @@ install_cert_to_nginx() {
     "$ACME" --install-cert -d "$domain" --ecc \
         --key-file       "$CERT_DIR/$domain/key.pem" \
         --fullchain-file "$CERT_DIR/$domain/fullchain.pem" \
-        --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload"
+        --reloadcmd "systemctl reload nginx 2>/dev/null || kill -HUP \"\$(pgrep -o -x nginx)\" 2>/dev/null || systemctl start nginx 2>/dev/null || nginx"
 }
 
 # ----------------------------- 渲染站点配置 ---------------------------------

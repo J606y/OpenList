@@ -325,6 +325,19 @@ render_site_file() {
             cache_block=$'        # 视频分片缓存：按 1MB 切片缓存 Range 响应（206）\n        slice 1m;\n        proxy_cache rpcache;\n        proxy_cache_key $scheme$host$uri$is_args$args$slice_range;\n        proxy_set_header Range $slice_range;\n        proxy_cache_valid 200 206 1d;\n        proxy_cache_valid 404 1m;\n        add_header X-Cache-Status $upstream_cache_status always;' ;;
     esac
 
+    # HTTPS 回源（target 为 https://域名）：必须补发 SNI、且把 Host 改成源站域名——
+    # 否则源站握手缺 SNI 会拿到默认证书，按 server_name 又匹配不到边缘域名 → 失败/串站。
+    # http:// 本机后端则保持 Host $host（OpenList 靠它生成对外链接）。
+    local host_hdr='$host' ssl_block='' up_hostport up_host
+    case "$target" in
+        https://*)
+            up_hostport="${target#*://}"; up_hostport="${up_hostport%%/*}"   # host[:port]
+            up_host="${up_hostport%%:*}"                                      # host（去端口）
+            host_hdr="$up_hostport"
+            ssl_block=$'\n        proxy_ssl_server_name on;\n        proxy_ssl_name '"$up_host;"
+            ;;
+    esac
+
     # 元信息（manage 解析用）
     {
         echo "# ===== 1keji-rp BEGIN ====="
@@ -354,7 +367,7 @@ server {
     location / {
         proxy_pass $target;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
+        proxy_set_header Host $host_hdr;$ssl_block
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -405,7 +418,7 @@ server {
     location / {
         proxy_pass $target;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
+        proxy_set_header Host $host_hdr;$ssl_block
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -452,7 +465,7 @@ configure_reverse_proxy() {
     local domain target maxbody created=0
     read -rp "请输入域名（如 v.example.com）: " domain
     [ -z "$domain" ] && { err "域名不能为空"; pause; return; }
-    read -rp "请输入反代目标（如 http://127.0.0.1:5244）: " target
+    read -rp "请输入反代目标（如 http://127.0.0.1:5244，也支持 https://源站域名 回源）: " target
     [ -z "$target" ] && { err "目标不能为空"; pause; return; }
     read -rp "客户端最大请求体大小 MB（上传用，默认 1024）: " maxbody
     [ -z "$maxbody" ] && maxbody=1024

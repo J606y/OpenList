@@ -30,7 +30,10 @@ REQUIRED_PORTS=(80 443)
 INSTALL_PATH="/usr/local/bin/nginx-rp.sh"
 SHORTCUT_CMD="n"
 SHORTCUT_PATH="/usr/local/bin/$SHORTCUT_CMD"
-# 自更新地址（菜单「更新本脚本」用）。GitHub raw 有约 5 分钟缓存。
+# 自更新地址（菜单「更新本脚本」用）。
+# 优先用 GitHub API contents 端点：基本无 CDN 缓存，秒级反映最新提交。
+# 失败再回退 raw（raw 有约 5 分钟 CDN 缓存，加随机 query 尽量绕过）。
+RAW_API_URL="https://api.github.com/repos/J606y/OpenList/contents/nginx-rp.sh?ref=feat/slim-storage"
 RAW_URL="https://raw.githubusercontent.com/J606y/OpenList/feat/slim-storage/nginx-rp.sh"
 
 # ----------------------------- 颜色输出 -------------------------------------
@@ -64,6 +67,15 @@ require_apt() {
 # （表现为“输入后直接卡死”）。把交互输入接回控制终端即可。
 ensure_tty() { [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; }; return 0; }
 
+# 拉取本脚本最新版到指定文件（无缓存优先）。返回 0 成功 / 1 失败。
+# ① GitHub API contents 端点：基本无缓存；② 回退 raw + 随机 query 尽量绕过缓存。
+fetch_latest_self() {
+    local out="$1"
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -fsSL -H 'Accept: application/vnd.github.raw' "$RAW_API_URL" -o "$out" 2>/dev/null && return 0
+    curl -fsSL "$RAW_URL?nocache=$(date +%s 2>/dev/null)" -o "$out" 2>/dev/null
+}
+
 # 安装快捷命令：把脚本拷到 /usr/local/bin，并创建命令 n。
 # 每次启动调用：已安装则静默（顺便更新脚本本体/刷新启动器），首次安装则提示。
 setup_shortcut() {
@@ -77,8 +89,7 @@ setup_shortcut() {
     if [ -n "$self" ] && [ -f "$self" ] && [ "$self" != "$INSTALL_PATH" ]; then
         cp -f "$self" "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"
     elif [ ! -f "$INSTALL_PATH" ]; then
-        if command -v curl >/dev/null 2>&1 && curl -fsSL "$RAW_URL" -o "$INSTALL_PATH" 2>/dev/null \
-           && bash -n "$INSTALL_PATH" 2>/dev/null; then
+        if fetch_latest_self "$INSTALL_PATH" && bash -n "$INSTALL_PATH" 2>/dev/null; then
             chmod +x "$INSTALL_PATH"
         else
             rm -f "$INSTALL_PATH" 2>/dev/null   # 没拉成功就别留半截文件
@@ -117,8 +128,8 @@ EOF
 self_update() {
     command -v curl >/dev/null 2>&1 || { err "需要 curl"; pause; return; }
     local tmp; tmp="$(mktemp)"
-    info "从 GitHub 拉取最新脚本（raw 有约 5 分钟缓存，刚推送可能要稍等）..."
-    if ! curl -fsSL "$RAW_URL" -o "$tmp"; then
+    info "从 GitHub 拉取最新脚本（API 端点，无缓存）..."
+    if ! fetch_latest_self "$tmp"; then
         err "下载失败，检查网络。"; rm -f "$tmp"; pause; return
     fi
     if ! bash -n "$tmp" 2>/dev/null; then

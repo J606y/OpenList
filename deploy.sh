@@ -112,7 +112,7 @@ cmd_install(){
   [ -z "$_ip" ] && _ip="<服务器IP>"
   echo; log "访问地址：  http://${_ip}:5244"
   log "再次管理：  输入  openlist  打开本面板（或 openlist update|restart|logs|status ...）"
-  warn "5244 别直接开公网，建议只放行边缘/反代 IP，用 nginx 反代（见 nginx-rp.sh）。"
+  warn "5244 别直接开公网，建议只放行边缘/反代 IP，用 nginx 反代（见 github.com/J606y/nginx-rp）。"
 }
 cmd_update(){ require_install; set_docker; ensure_node; ensure_pnpm
   clone_or_pull "$BACKEND_REPO"  "$BACKEND_DIR" "$BRANCH"

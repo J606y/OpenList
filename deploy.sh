@@ -50,6 +50,13 @@ pick_docker(){ command -v docker >/dev/null 2>&1 || { warn "未检测到 docker�
 # 在 fail-fast 子shell中执行过程性命令：失败只回到菜单，而不退出整个脚本
 run(){ ( set -e; "$@" ); }
 
+# 防止 install/update 并发执行互踩 public/dist(需 util-linux 的 flock;无则跳过不阻塞)
+acquire_lock(){
+  command -v flock >/dev/null 2>&1 || return 0
+  exec 9>"$BASE_DIR/.deploy.lock" 2>/dev/null || return 0
+  flock -n 9 || die "已有部署/更新在进行中(锁: $BASE_DIR/.deploy.lock)；请等它结束再试"
+}
+
 set_docker(){ command -v docker >/dev/null 2>&1 || die "docker 未安装，请先安装"; DOCKER="docker"; docker info >/dev/null 2>&1 || DOCKER="$SUDO docker"; }
 ensure_git(){ command -v git >/dev/null 2>&1 || { log "安装 git..."; $SUDO apt-get update && $SUDO apt-get install -y git || die "请先装 git"; }; }
 ensure_docker(){
@@ -70,7 +77,12 @@ ensure_node(){
 ensure_pnpm(){ command -v pnpm >/dev/null 2>&1 && return; log "启用 pnpm..."; $SUDO corepack enable 2>/dev/null || $SUDO npm i -g pnpm; corepack prepare pnpm@latest --activate 2>/dev/null || true; }
 
 clone_or_pull(){ local repo="$1" dir="$2" br="${3:-}";
-  if [ -d "$dir/.git" ]; then log "更新 $(basename "$dir")..."; git -C "$dir" pull --ff-only
+  if [ -d "$dir/.git" ]; then
+    log "更新 $(basename "$dir")..."
+    git -C "$dir" fetch --prune origin || die "拉取失败：$dir（检查网络/仓库可达）"
+    local ref="origin/HEAD"; [ -n "$br" ] && ref="origin/$br"
+    # 部署机以远端为准：硬对齐远端(丢弃本地改动),替代 --ff-only——本地一旦分叉,ff-only 会中断整个更新
+    git -C "$dir" reset --hard "$ref" || die "无法对齐 $ref：$dir"
   elif [ -n "$br" ]; then log "克隆 $(basename "$dir")..."; git clone -b "$br" "$repo" "$dir"
   else log "克隆 $(basename "$dir")..."; git clone "$repo" "$dir"; fi; }
 
@@ -80,16 +92,30 @@ require_install(){ [ -d "$BACKEND_DIR/.git" ] || die "未找到安装 $BACKEND_D
 build_and_up(){
   log "原生构建前端（绕开 Docker 内 rolldown 段错误）..."
   ( cd "$FRONTEND_DIR" && pnpm install && pnpm build )
-  log "嵌入前端到 public/dist..."
-  rm -rf "$BACKEND_DIR/public/dist"; cp -r "$FRONTEND_DIR/dist" "$BACKEND_DIR/public/dist"
+  # 校验产物完整,避免把半个 dist 嵌进去
+  [ -f "$FRONTEND_DIR/dist/index.html" ] || die "前端构建产物缺失(dist/index.html)；现有 public/dist 未改动"
+  log "嵌入前端到 public/dist（备份旧产物，失败自动回滚）..."
+  local dst="$BACKEND_DIR/public/dist" bak="$BACKEND_DIR/public/dist.bak"
+  rm -rf "$bak"
+  if [ -e "$dst" ]; then mv "$dst" "$bak"; fi
+  if ! cp -r "$FRONTEND_DIR/dist" "$dst"; then
+    rm -rf "$dst"; if [ -e "$bak" ]; then mv "$bak" "$dst"; fi
+    die "嵌入前端失败，已回滚旧产物"
+  fi
   log "构建并启动容器..."
   export GIT_COMMIT="$(git -C "$BACKEND_DIR" rev-parse --short HEAD 2>/dev/null || echo local)"
-  compose up -d --build
+  if ! compose up -d --build; then
+    warn "容器构建/启动失败，回滚 public/dist（旧容器若在运行不受影响）"
+    rm -rf "$dst"; if [ -e "$bak" ]; then mv "$bak" "$dst"; fi
+    die "构建/启动失败，已回滚前端产物；代码已在新版本，如需回退代码： git -C \"$BACKEND_DIR\" reset --hard <旧commit> 后重跑 update"
+  fi
+  rm -rf "$bak"
 }
 
 cmd_install(){
   ensure_git; ensure_docker; ensure_node; ensure_pnpm
   mkdir -p "$BASE_DIR"
+  acquire_lock
   clone_or_pull "$BACKEND_REPO"  "$BACKEND_DIR" "$BRANCH"
   clone_or_pull "$FRONTEND_REPO" "$FRONTEND_DIR"
   build_and_up
@@ -98,14 +124,18 @@ cmd_install(){
   echo; log "部署完成。"; compose ps; echo
   # 读取首次启动生成的随机管理员密码（轮询日志，最多 ~25s 等服务初始化）
   log "读取管理员账号（首次启动会生成随机密码）..."
-  local _logs="" _i
+  local _logs="" _pw="" _i
   for ((_i=1;_i<=25;_i++)); do
     _logs="$(compose logs openlist 2>&1 || true)"
-    echo "$_logs" | grep -qiE 'password|admin' && break
+    _pw="$(printf '%s\n' "$_logs" | grep -F 'initial password is:' | tail -1)"
+    [ -n "$_pw" ] && break
     sleep 1
   done
-  echo "$_logs" | grep -iE 'username|password|admin|初始' | tail -8 \
-    || warn "未捕获到账号日志；若非首次启动属正常，可用菜单 8) 重设管理员密码。"
+  if [ -n "$_pw" ]; then
+    echo; log "管理员账号（首次启动生成，请立即登录并妥善保存）："; printf '    %s\n' "$_pw"
+  else
+    warn "未捕获到首启密码（多为复用旧数据卷/非首次启动，属正常）：沿用旧账号，或用菜单 8) 重设。"
+  fi
   # 探测访问 IP（公网优先，失败回退内网网卡 IP）
   local _ip; _ip="$(curl -fsS4 --max-time 5 ifconfig.me 2>/dev/null || true)"
   [ -z "$_ip" ] && _ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -115,9 +145,12 @@ cmd_install(){
   warn "5244 别直接开公网，建议只放行边缘/反代 IP，用 nginx 反代（见 github.com/J606y/nginx-rp）。"
 }
 cmd_update(){ require_install; set_docker; ensure_node; ensure_pnpm
+  acquire_lock
   clone_or_pull "$BACKEND_REPO"  "$BACKEND_DIR" "$BRANCH"
   clone_or_pull "$FRONTEND_REPO" "$FRONTEND_DIR"
-  build_and_up; log "更新完成。"; compose ps; }
+  build_and_up
+  log "清理悬空镜像..."; $DOCKER image prune -f >/dev/null 2>&1 || true
+  log "更新完成。"; compose ps; }
 cmd_restart(){ require_install; set_docker; log "重启..."; compose restart; compose ps; }
 cmd_stop(){    require_install; set_docker; log "停止..."; compose stop; }
 cmd_start(){   require_install; set_docker; log "启动..."; compose up -d; compose ps; }
@@ -169,7 +202,7 @@ M
       6)  if need_install && pick_docker; then compose ps; fi ;;
       7)  if need_install && pick_docker; then compose logs --tail=200; fi ;;
       8)  if need_install && pick_docker; then
-            printf "  新管理员密码: "; read -r pw
+            printf "  新管理员密码(输入隐藏): "; read -rs pw; echo
             if [ -n "${pw:-}" ]; then compose exec openlist ./openlist admin set "$pw" && log "密码已更新"; else warn "已取消"; fi
           fi ;;
       9)  if need_install; then run cmd_uninstall || warn "卸载失败"; fi ;;

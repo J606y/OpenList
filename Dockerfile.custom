@@ -23,7 +23,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="\
     -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=custom'" \
     -o /app/bin/openlist .
 
-FROM alpine:edge
+# 钉稳定版本(不用滚动的 edge),保证构建可复现;运行期只需 bash/ca-certificates/tzdata,stable 均有。
+FROM alpine:3.21
 RUN apk add --no-cache bash ca-certificates tzdata && \
     addgroup -g 1001 openlist && \
     adduser -D -u 1001 -G openlist openlist

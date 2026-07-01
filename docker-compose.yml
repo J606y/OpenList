@@ -12,10 +12,18 @@ services:
     volumes:
       - 'openlist-data:/opt/openlist/data'
     ports:
-      - '5244:5244'
+      # 同机反代:只绑环回,杜绝 5244 公网明文直连(对外一律走反代 HTTPS)
+      - '127.0.0.1:5244:5244'
     environment:
       - UMASK=022
       - TZ=Asia/Shanghai
+    healthcheck:
+      # 容器内直接探 /ping(base_path=/);进程 hang 但没退出时会被标为 unhealthy(compose ps 可见)
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5244/ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
 
 volumes:
   openlist-data:

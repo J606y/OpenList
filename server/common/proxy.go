@@ -27,8 +27,13 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 
 	// 多线程代理转发：对支持 Range 的远程直链注入并发分片下载，避免单连接被上游限速。
 	// 仅当驱动未自行指定并发、且是非本机 API 的远程 URL 时生效；小文件由下载器自动降为单线程。
+	// 自引用链接(相对路径,或指回本机 API)不能开并发分片,否则会代理自循环;
+	// 远程驱动直链(OneDrive/PikPak)是绝对外链,正常获得并发。ApiUrl 为空时以相对前缀兜底判定。
+	apiURL := GetApiUrl(r.Context())
+	isSelfLink := strings.HasPrefix(link.URL, "/") ||
+		(apiURL != "" && strings.HasPrefix(link.URL, apiURL+"/"))
 	if link.RangeReader == nil && link.Concurrency == 0 && link.PartSize == 0 &&
-		len(link.URL) > 0 && !strings.HasPrefix(link.URL, GetApiUrl(r.Context())+"/") {
+		len(link.URL) > 0 && !isSelfLink {
 		if concurrency := setting.GetInt(conf.ProxyDownloadConcurrency, 0); concurrency > 1 {
 			link.Concurrency = concurrency
 			link.PartSize = net.DefaultDownloadPartSize

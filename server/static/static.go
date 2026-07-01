@@ -57,6 +57,9 @@ func initStatic() {
 
 func replaceStrings(content string, replacements map[string]string) string {
 	for old, new := range replacements {
+		if old != new && !strings.Contains(content, old) {
+			utils.Log.Warnf("index.html: placeholder %q not found, replacement skipped (frontend template may have changed)", old)
+		}
 		content = strings.Replace(content, old, new, 1)
 	}
 	return content
@@ -190,9 +193,18 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	if conf.Conf.Cdn == "" {
 		utils.Log.Debug("Setting up static file serving...")
 		r.Use(func(c *gin.Context) {
+			uri := c.Request.RequestURI
+			// 仅 /assets/ 是内容 hash 化文件名 → 可长期强缓存且永不 revalidate(immutable)。
+			if strings.HasPrefix(uri, "/assets/") {
+				c.Header("Cache-Control", "public, max-age=15552000, immutable")
+				return
+			}
+			// images/streamer/static 是稳定文件名(sw.js、字体、monaco 等),内容会变而 URL 不变:
+			// 只给短缓存 + 必须 revalidate,改了能较快生效,不再被 180 天钉死。
 			for _, folder := range folders {
-				if strings.HasPrefix(c.Request.RequestURI, fmt.Sprintf("/%s/", folder)) {
-					c.Header("Cache-Control", "public, max-age=15552000")
+				if strings.HasPrefix(uri, fmt.Sprintf("/%s/", folder)) {
+					c.Header("Cache-Control", "public, max-age=3600, must-revalidate")
+					return
 				}
 			}
 		})
@@ -220,6 +232,9 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			c.Status(405)
 			return
 		}
+		// index.html 必须每次向源站校验:每次重建前端 chunk 全换新 hash、旧 chunk 即删,
+		// 缓存住旧 HTML 会指向已不存在的 chunk → 前端 "Failed to fetch dynamically imported module"。
+		c.Header("Cache-Control", "no-cache")
 		c.Header("Content-Type", "text/html")
 		c.Status(200)
 		if strings.HasPrefix(c.Request.URL.Path, "/@manage") {

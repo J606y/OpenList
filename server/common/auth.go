@@ -5,7 +5,6 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
-	"github.com/OpenListTeam/go-cache"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/pkg/errors"
 )
@@ -17,8 +16,6 @@ type UserClaims struct {
 	PwdTS    int64  `json:"pwd_ts"`
 	jwt.RegisteredClaims
 }
-
-var validTokenCache = cache.NewMemCache[bool]()
 
 func GenerateToken(user *model.User) (tokenString string, err error) {
 	claim := UserClaims{
@@ -34,7 +31,6 @@ func GenerateToken(user *model.User) (tokenString string, err error) {
 	if err != nil {
 		return "", err
 	}
-	validTokenCache.Set(tokenString, true)
 	return tokenString, err
 }
 
@@ -42,9 +38,6 @@ func ParseToken(tokenString string) (*UserClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return SecretKey, nil
 	})
-	if IsTokenInvalidated(tokenString) {
-		return nil, errors.New("token is invalidated")
-	}
 	if err != nil {
 		if ve, ok := err.(*jwt.ValidationError); ok {
 			if ve.Errors&jwt.ValidationErrorMalformed != 0 {
@@ -64,15 +57,10 @@ func ParseToken(tokenString string) (*UserClaims, error) {
 	return nil, errors.New("couldn't handle this token")
 }
 
+// InvalidateToken is a no-op: tokens are stateless JWTs validated purely by
+// signature + expiry (and PwdTS for password changes). Server-side logout
+// invalidation was dropped so tokens survive process restarts. Logout still
+// works client-side (the browser discards the token).
 func InvalidateToken(tokenString string) error {
-	if tokenString == "" {
-		return nil // don't invalidate empty guest token
-	}
-	validTokenCache.Del(tokenString)
 	return nil
-}
-
-func IsTokenInvalidated(tokenString string) bool {
-	_, ok := validTokenCache.Get(tokenString)
-	return !ok
 }
